@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -317,4 +318,81 @@ func subKeys(m map[string]*fakeSub) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// --- Additional error-path tests ---
+
+// closedSubConn is a fakeConn variant whose Subscribe returns a pre-closed
+// channel. The closed channel triggers the fetchToken !ok exit path, which
+// surfaces as an error rather than blocking indefinitely.
+type closedSubConn struct {
+	*fakeConn
+}
+
+func (c *closedSubConn) Subscribe(_ context.Context, dest string) (transport.Subscription, error) {
+	ch := make(chan transport.Msg)
+	close(ch) // closed before any message is delivered
+	sub := &fakeSub{ch: ch}
+	c.fakeConn.subs[dest] = sub
+	return sub, nil
+}
+
+// TestExchange_SubscriptionClosedBeforeToken verifies that Exchange returns an error
+// when the subscription channel is closed before a token is delivered.
+func TestExchange_SubscriptionClosedBeforeToken(t *testing.T) {
+	t.Parallel()
+
+	conn1 := &closedSubConn{fakeConn: newFakeConn("")}
+	conn2 := newFakeConn("")
+	dialer := newFakeDialer(conn1, conn2)
+
+	_, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second)
+	if err == nil {
+		t.Fatal("expected error when subscription channel closes before token, got nil")
+	}
+	if !strings.Contains(err.Error(), "closed") {
+		t.Errorf("error should mention subscription closed, got: %v", err)
+	}
+}
+
+// errSubConn is a fakeConn variant whose Send delivers a transport.Msg with a
+// non-nil Err instead of a token body. This triggers the msg.Err != nil exit path.
+type errSubConn struct {
+	*fakeConn
+	subErr error
+}
+
+func (c *errSubConn) Send(_ context.Context, dest, _ string, body []byte, headers map[string]string) error {
+	c.fakeConn.sends = append(c.fakeConn.sends, sentMsg{
+		destination: dest,
+		body:        append([]byte(nil), body...),
+		headers:     copyMap(headers),
+	})
+	// Deliver an error message on the reply-to subscription instead of a token.
+	if replyTo, ok := headers["reply-to"]; ok {
+		queueDest := "/queue/" + replyTo
+		if sub, found := c.fakeConn.subs[queueDest]; found {
+			sub.ch <- transport.Msg{Err: c.subErr}
+		}
+	}
+	return nil
+}
+
+// TestExchange_TokenSubscriptionError verifies that Exchange returns an error
+// when the broker delivers an error message on the token subscription.
+func TestExchange_TokenSubscriptionError(t *testing.T) {
+	t.Parallel()
+
+	brokerErr := errors.New("broker error on token subscription")
+	conn1 := &errSubConn{fakeConn: newFakeConn(""), subErr: brokerErr}
+	conn2 := newFakeConn("")
+	dialer := newFakeDialer(conn1, conn2)
+
+	_, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second)
+	if err == nil {
+		t.Fatal("expected error when broker delivers subscription error, got nil")
+	}
+	if !strings.Contains(err.Error(), brokerErr.Error()) {
+		t.Errorf("error should wrap broker error: want %q in %q", brokerErr.Error(), err.Error())
+	}
 }
