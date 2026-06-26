@@ -19,6 +19,13 @@ import (
 // DefaultHeartBeat matches GRIDAPPSD_HEARTBEAT (10 s) used by the GridAPPS-D broker.
 const DefaultHeartBeat = 10 * time.Second
 
+// subChanBuf is the buffer depth for the bridge output channel.
+// A buffer of this size absorbs bursts of consecutive broker frames without
+// stalling the go-stomp read loop. Must be non-zero to decouple the bridge
+// pace from the consumer; the bridge's nested-select exit prevents the goroutine
+// from leaking when the consumer is slow and the buffer is full.
+const subChanBuf = 16
+
 // Dialer is the go-stomp-backed transport.Dialer.
 // Wrap an already-dialed TLS net.Conn and this type handles the STOMP handshake.
 type Dialer struct{}
@@ -85,17 +92,25 @@ func (c *conn) Disconnect() error {
 	return nil
 }
 
+// goStompSub is the subset of *gostomp.Subscription used by the bridge.
+// Defined as an interface to allow whitebox testing without a live broker.
+type goStompSub interface {
+	Unsubscribe(opts ...func(*frame.Frame) error) error
+}
+
 // sub bridges a *gostomp.Subscription into transport.Subscription.
 // A goroutine forwards messages from the gostomp channel to s.ch.
 type sub struct {
-	gossub *gostomp.Subscription
+	gossub goStompSub
+	src    <-chan *gostomp.Message
 	ch     chan transport.Msg
 }
 
 func newSub(ctx context.Context, gossub *gostomp.Subscription) *sub {
 	s := &sub{
 		gossub: gossub,
-		ch:     make(chan transport.Msg, 16),
+		src:    gossub.C,
+		ch:     make(chan transport.Msg, subChanBuf),
 	}
 	go s.bridge(ctx)
 	return s
@@ -113,7 +128,7 @@ func (s *sub) bridge(ctx context.Context) {
 	defer close(s.ch)
 	for {
 		select {
-		case msg, ok := <-s.gossub.C:
+		case msg, ok := <-s.src:
 			if !ok {
 				// go-stomp closed its channel: subscription ended.
 				return
