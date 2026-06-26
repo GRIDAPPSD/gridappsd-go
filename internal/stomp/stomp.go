@@ -32,12 +32,26 @@ type Dialer struct{}
 
 // Dial performs the STOMP CONNECT handshake over rwc.
 // cfg.HeartBeat defaults to DefaultHeartBeat when zero.
-// ctx is stored but go-stomp's synchronous handshake is not context-aware;
-// network-level cancellation must be handled by the caller before invoking Dial.
-func (d *Dialer) Dial(_ context.Context, rwc io.ReadWriteCloser, cfg transport.ConnConfig) (transport.Conn, error) {
+// ctx deadline, if set, is applied to rwc before the handshake and cleared
+// after; go-stomp's Connect has no built-in context support, so a cancelled ctx
+// without a deadline does not interrupt the handshake.
+func (d *Dialer) Dial(ctx context.Context, rwc io.ReadWriteCloser, cfg transport.ConnConfig) (transport.Conn, error) {
 	hb := cfg.HeartBeat
 	if hb == 0 {
 		hb = DefaultHeartBeat
+	}
+	// Bound the synchronous STOMP CONNECT handshake using any deadline in ctx.
+	// go-stomp's Connect is not context-aware; applying a deadline on the
+	// underlying connection is the only mechanism to unblock a hung handshake.
+	// The deadline is cleared after Connect so subsequent I/O is not bounded.
+	if dl, ok := ctx.Deadline(); ok {
+		type deadliner interface {
+			SetDeadline(time.Time) error
+		}
+		if dc, ok2 := rwc.(deadliner); ok2 {
+			_ = dc.SetDeadline(dl)
+			defer func() { _ = dc.SetDeadline(time.Time{}) }()
+		}
 	}
 	c, err := gostomp.Connect(rwc,
 		gostomp.ConnOpt.Login(cfg.Login, cfg.Passcode),
