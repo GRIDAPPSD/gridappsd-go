@@ -104,6 +104,8 @@ func fetchToken(
 		return "", fmt.Errorf("credential connect: %w", err)
 	}
 	// Always disconnect the credential connection; goss.py leaks it, we do not.
+	// Error intentionally discarded: the credential leg is disposable once the
+	// token is received; Disconnect failure has no meaningful recovery path here.
 	defer func() { _ = conn1.Disconnect() }()
 
 	// Named temp reply destination. The subscribe uses the /queue/ prefix;

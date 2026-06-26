@@ -68,12 +68,11 @@ type conn struct {
 	c *gostomp.Conn
 }
 
-// Send transmits a STOMP SEND frame to destination.
-// Each entry in headers becomes an additional STOMP frame header.
 // The "reply-to" key in headers sets the reply-to header on the SEND frame;
 // it is NOT passed to Subscribe and does NOT trigger go-stomp's RabbitMQ-style
 // temp-queue path (which intercepts reply-to on SUBSCRIBE, not SEND).
 func (c *conn) Send(_ context.Context, destination, contentType string, body []byte, headers map[string]string) error {
+	// ctx unused: go-stomp's Conn.Send is synchronous with no context support.
 	opts := make([]func(*frame.Frame) error, 0, len(headers))
 	for k, v := range headers {
 		opts = append(opts, gostomp.SendOpt.Header(k, v))
@@ -84,7 +83,6 @@ func (c *conn) Send(_ context.Context, destination, contentType string, body []b
 	return nil
 }
 
-// Subscribe creates a subscription on destination with auto-ack.
 // Cancelling ctx triggers an Unsubscribe so the broker stops delivering messages.
 func (c *conn) Subscribe(ctx context.Context, destination string) (transport.Subscription, error) {
 	// AckAuto: GOSS does not require explicit message acknowledgement.
