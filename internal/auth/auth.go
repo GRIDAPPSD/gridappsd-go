@@ -19,7 +19,9 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -60,7 +62,7 @@ func Exchange(
 ) (transport.Conn, error) {
 	token, err := fetchToken(ctx, netDial, d, user, pass, heartBeat)
 	if err != nil {
-		return nil, fmt.Errorf("auth exchange (user=%q): %w", user, err)
+		return nil, fmt.Errorf("auth exchange: %w", err)
 	}
 
 	// Second leg: token as login, empty passcode.
@@ -107,8 +109,14 @@ func fetchToken(
 	// Named temp reply destination. The subscribe uses the /queue/ prefix;
 	// the reply-to header on SEND uses the bare name (no prefix). GOSS routes
 	// the reply to /queue/<replyDest> based on the reply-to value.
-	nonce := time.Now().UnixNano()
-	replyDest := fmt.Sprintf("%s%s-%d", replyDestPrefix, user, nonce)
+	//
+	// Use crypto/rand for the nonce to avoid collisions when the same user
+	// performs concurrent re-auth. UnixNano is collision-prone under parallel calls.
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("generating reply-queue nonce: %w", err)
+	}
+	replyDest := fmt.Sprintf("%s%s-%s", replyDestPrefix, user, hex.EncodeToString(nonce[:]))
 	queueDest := "/queue/" + replyDest
 
 	// Subscribe BEFORE sending the request so no message is missed.

@@ -44,7 +44,7 @@ func (d *Dialer) Dial(_ context.Context, rwc io.ReadWriteCloser, cfg transport.C
 		gostomp.ConnOpt.HeartBeat(hb, hb),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("stomp connect (login=%q): %w", cfg.Login, err)
+		return nil, fmt.Errorf("stomp connect: %w", err)
 	}
 	return &conn{c: c}, nil
 }
