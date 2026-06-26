@@ -33,12 +33,16 @@ type fakeConn struct {
 	// tokenToDeliver is the token body placed on the subscription channel
 	// when a SEND carrying a "reply-to" header is received.
 	tokenToDeliver string
+	// deliverToken gates auto-delivery in Send; false simulates a
+	// slow/unresponsive broker that never routes a reply.
+	deliverToken bool
 }
 
 func newFakeConn(token string) *fakeConn {
 	return &fakeConn{
 		subs:           make(map[string]*fakeSub),
 		tokenToDeliver: token,
+		deliverToken:   token != "",
 	}
 }
 
@@ -55,12 +59,14 @@ func (c *fakeConn) Send(_ context.Context, dest, _ string, body []byte, headers 
 		body:        append([]byte(nil), body...),
 		headers:     copyMap(headers),
 	})
-	// Simulate GOSS server routing: when reply-to is present, deliver the token
-	// on the subscription channel for /queue/<replyDest>.
-	if replyTo, ok := headers["reply-to"]; ok {
-		queueDest := "/queue/" + replyTo
-		if sub, found := c.subs[queueDest]; found {
-			sub.ch <- transport.Msg{Body: []byte(c.tokenToDeliver)}
+	// Simulate GOSS server routing: deliver the token only when deliverToken is
+	// true; a false value models a slow/unresponsive broker that never replies.
+	if c.deliverToken {
+		if replyTo, ok := headers["reply-to"]; ok {
+			queueDest := "/queue/" + replyTo
+			if sub, found := c.subs[queueDest]; found {
+				sub.ch <- transport.Msg{Body: []byte(c.tokenToDeliver)}
+			}
 		}
 	}
 	return nil
@@ -245,11 +251,8 @@ func TestExchange_WireLevelInvariants(t *testing.T) {
 func TestExchange_CtxCancelledBeforeToken(t *testing.T) {
 	t.Parallel()
 
-	// conn1 never delivers a token (no tokenToDeliver set, Send does not route).
+	// conn1 never delivers a token: deliverToken is false when the token string is empty.
 	conn1 := newFakeConn("")
-	conn1.tokenToDeliver = "" // override to suppress auto-delivery
-
-	// Patch Send to NOT deliver a token, simulating a slow/unresponsive broker.
 	conn2 := newFakeConn("")
 	dialer := newFakeDialer(conn1, conn2)
 
@@ -270,12 +273,9 @@ func TestExchange_CtxCancelledBeforeToken(t *testing.T) {
 func TestExchange_EmptyToken(t *testing.T) {
 	t.Parallel()
 
-	// conn1 delivers an empty token body.
-	conn1 := newFakeConn("")
-	// Override Send so it delivers an empty body.
-	conn1.tokenToDeliver = ""
-	// We need a custom fakeConn that delivers empty; current fakeConn skips delivery
-	// when tokenToDeliver is "". Use a variant with explicit empty delivery.
+	// emptyConn delivers a zero-byte body to simulate a broker that replies with
+	// an empty token. newFakeConn("") would suppress delivery entirely; this
+	// variant sends the empty body explicitly.
 	emptyConn := &emptyTokenConn{fakeConn: newFakeConn("")}
 	conn2 := newFakeConn("")
 	dialer := newFakeDialer(emptyConn, conn2)
