@@ -123,7 +123,8 @@ func (s *sub) Unsubscribe() error {
 }
 
 // bridge runs in a goroutine, forwarding from gostomp.Subscription.C to s.ch.
-// It exits on channel close or ctx cancellation.
+// Each outbound send is wrapped in a nested select so a full s.ch cannot trap
+// the goroutine when ctx is cancelled; the goroutine always has an exit path.
 func (s *sub) bridge(ctx context.Context) {
 	defer close(s.ch)
 	for {
@@ -133,11 +134,21 @@ func (s *sub) bridge(ctx context.Context) {
 				// go-stomp closed its channel: subscription ended.
 				return
 			}
+			m := transport.Msg{Body: msg.Body}
 			if msg.Err != nil {
-				s.ch <- transport.Msg{Err: msg.Err}
+				m = transport.Msg{Err: msg.Err}
+			}
+			select {
+			case s.ch <- m:
+			case <-ctx.Done():
+				// Best-effort unsubscribe; ignore error since context is already done.
+				_ = s.gossub.Unsubscribe()
 				return
 			}
-			s.ch <- transport.Msg{Body: msg.Body}
+			if msg.Err != nil {
+				// Error messages are terminal: exit after forwarding.
+				return
+			}
 		case <-ctx.Done():
 			// Best-effort unsubscribe; ignore error since context is already done.
 			_ = s.gossub.Unsubscribe()
