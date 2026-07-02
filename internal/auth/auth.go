@@ -126,6 +126,12 @@ func fetchToken(
 	if err != nil {
 		return "", fmt.Errorf("token subscribe %q: %w", queueDest, err)
 	}
+	// Best-effort unsubscribe when fetchToken returns (success or error). On
+	// the success path the token has already been read and the subscription is
+	// spent; on the error path ctx is done or the subscription never delivered.
+	// Unsubscribe failure has no recovery path: the credential connection is
+	// disconnected by the sibling defer above, which terminates the underlying
+	// STOMP session regardless.
 	defer func() { _ = sub.Unsubscribe() }()
 
 	// The payload is base64(user + ":" + password), exactly as goss.py does:

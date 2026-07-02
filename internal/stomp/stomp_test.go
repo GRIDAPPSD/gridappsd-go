@@ -16,13 +16,21 @@ import (
 )
 
 // fakeStompSub implements goStompSub for whitebox bridge tests without a live broker.
+//
+// unsubNotify, when non-nil, receives an empty struct on each Unsubscribe call,
+// giving tests a deterministic signal that the bridge has reached the unsubscribe
+// path. It is nil in tests that do not need it.
 type fakeStompSub struct {
 	ch          chan *gostomp.Message
 	unsubCalled atomic.Bool
+	unsubNotify chan struct{} // optional; nil if unused
 }
 
 func (f *fakeStompSub) Unsubscribe(opts ...func(*frame.Frame) error) error {
 	f.unsubCalled.Store(true)
+	if f.unsubNotify != nil {
+		f.unsubNotify <- struct{}{}
+	}
 	return nil
 }
 
@@ -86,6 +94,10 @@ func TestBridge_SourceCloseExits(t *testing.T) {
 // send indefinitely and this test fails at the 500 ms timeout. A WaitGroup tracks
 // goroutine exit independently of s.ch so the test does not accidentally act as a
 // receiver and unblock the bridge's stuck send.
+//
+// Synchronization is deterministic: the sub.readyForSend hook fires inside the
+// bridge immediately before the blocking outbound send, so cancel() is called
+// only after the goroutine is provably at the blocking point.
 func TestBridge_CtxCancelExitsGoroutine(t *testing.T) {
 	t.Parallel()
 
@@ -93,12 +105,17 @@ func TestBridge_CtxCancelExitsGoroutine(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// readyForSend is buffered by 1 so the bridge can write without blocking
+	// even if the test goroutine has not yet reached the receive.
+	ready := make(chan struct{}, 1)
+
 	// Deliberately unbuffered output channel: the bridge blocks immediately on
 	// the first outbound send because nobody is reading from s.ch.
 	s := &sub{
-		gossub: f,
-		src:    f.ch,
-		ch:     make(chan transport.Msg, 0),
+		gossub:       f,
+		src:          f.ch,
+		ch:           make(chan transport.Msg, 0),
+		readyForSend: ready,
 	}
 
 	var wg sync.WaitGroup
@@ -108,12 +125,17 @@ func TestBridge_CtxCancelExitsGoroutine(t *testing.T) {
 		s.bridge(ctx)
 	}()
 
-	// Queue a message; the bridge dequeues it and blocks on s.ch (unbuffered, no reader).
+	// Queue a message; the bridge dequeues it and signals readyForSend just
+	// before blocking on s.ch (unbuffered, no reader).
 	f.ch <- &gostomp.Message{Body: []byte("stuck")}
 
-	// Small delay so the bridge goroutine proceeds past the source receive and
-	// reaches the blocking outbound send before we cancel.
-	time.Sleep(10 * time.Millisecond)
+	// Wait until the bridge is provably at the outbound-send blocking point
+	// before cancelling. No sleep: this is a deterministic rendezvous.
+	select {
+	case <-ready:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("bridge goroutine did not reach the outbound-send point within 500 ms")
+	}
 
 	// Cancelling ctx must unblock the bridge via the nested-select ctx.Done case.
 	cancel()
@@ -133,16 +155,33 @@ func TestBridge_CtxCancelExitsGoroutine(t *testing.T) {
 
 // TestBridge_CtxCancelCallsUnsubscribe verifies that ctx cancellation triggers
 // a best-effort Unsubscribe on the upstream subscription.
+//
+// Synchronization is deterministic: unsubNotify receives a struct when the
+// bridge calls Unsubscribe, so the test waits on that channel rather than
+// sleeping for an arbitrary duration.
 func TestBridge_CtxCancelCallsUnsubscribe(t *testing.T) {
 	t.Parallel()
-	f := &fakeStompSub{ch: make(chan *gostomp.Message)}
+
+	// unsubNotify is buffered by 1 so fakeStompSub.Unsubscribe does not block
+	// if the test goroutine has not yet reached the select below.
+	unsubNotify := make(chan struct{}, 1)
+	f := &fakeStompSub{
+		ch:          make(chan *gostomp.Message),
+		unsubNotify: unsubNotify,
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := newBridgeSub(ctx, f, subChanBuf)
 	_ = s
 
 	cancel()
-	// Allow the goroutine to observe ctx.Done and call Unsubscribe.
-	time.Sleep(20 * time.Millisecond)
+
+	// Wait until the bridge provably calls Unsubscribe; no sleep required.
+	select {
+	case <-unsubNotify:
+		// Unsubscribe was called: bridge observes ctx.Done and calls Unsubscribe.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected Unsubscribe to be called on ctx cancel within 500 ms, but it was not")
+	}
 
 	if !f.unsubCalled.Load() {
 		t.Error("expected Unsubscribe to be called on ctx cancel, but it was not")

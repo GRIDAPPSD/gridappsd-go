@@ -49,8 +49,19 @@ func (d *Dialer) Dial(ctx context.Context, rwc io.ReadWriteCloser, cfg transport
 			SetDeadline(time.Time) error
 		}
 		if dc, ok2 := rwc.(deadliner); ok2 {
+			// Error discarded: SetDeadline failure here is non-actionable; if rwc
+			// cannot accept a deadline the handshake may still succeed or will fail
+			// on its own, and either outcome is handled by the gostomp.Connect error
+			// path below.
 			_ = dc.SetDeadline(dl)
-			defer func() { _ = dc.SetDeadline(time.Time{}) }()
+			defer func() {
+				// Clear the deadline so post-handshake I/O is not bounded by the
+				// ctx deadline. Error discarded: on the failure path (Connect returned
+				// an error) the caller owns rwc and will close it; clearing the
+				// deadline on a failed or closed connection is a no-op with no
+				// recovery path.
+				_ = dc.SetDeadline(time.Time{})
+			}()
 		}
 	}
 	c, err := gostomp.Connect(rwc,
@@ -112,10 +123,16 @@ type goStompSub interface {
 
 // sub bridges a *gostomp.Subscription into transport.Subscription.
 // A goroutine forwards messages from the gostomp channel to s.ch.
+//
+// readyForSend is a test-only hook: when non-nil, the bridge sends on it
+// immediately before attempting the outbound send to s.ch, giving the test
+// a deterministic signal that the goroutine has reached the blocking point.
+// It is nil in all production code paths.
 type sub struct {
-	gossub goStompSub
-	src    <-chan *gostomp.Message
-	ch     chan transport.Msg
+	gossub       goStompSub
+	src          <-chan *gostomp.Message
+	ch           chan transport.Msg
+	readyForSend chan struct{} // test hook; nil in production
 }
 
 func newSub(ctx context.Context, gossub *gostomp.Subscription) *sub {
@@ -149,6 +166,12 @@ func (s *sub) bridge(ctx context.Context) {
 			m := transport.Msg{Body: msg.Body}
 			if msg.Err != nil {
 				m = transport.Msg{Err: msg.Err}
+			}
+			// Signal the test hook (nil in production) that we are about to
+			// attempt the outbound send; this gives tests a deterministic
+			// synchronization point before they cancel ctx.
+			if s.readyForSend != nil {
+				s.readyForSend <- struct{}{}
 			}
 			select {
 			case s.ch <- m:
