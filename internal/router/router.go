@@ -23,41 +23,38 @@
 //   - A sync.WaitGroup tracks every live reader goroutine so Close can wait for
 //     all of them to exit before returning.
 //
-// Duplicate-handler guard: Go cannot compare function values for equality
-// (https://go.dev/ref/spec#Comparison_operators). The guard is implemented via
-// an opaque *handlerEntry wrapper: Subscribe wraps the caller's func in a new
-// *handlerEntry each call. The duplicate check compares the func value via
-// an fmt.Sprintf("%p") pointer key stored at registration time. If two calls
-// supply the exact same func literal (same address), the second is rejected.
-// Closures that happen to share an address are unlikely in practice; this is
-// the narrowest correct mechanism available in stdlib Go without reflection.
-// The behavior mirrors goss.py:418-419 ("Callbacks can only be used one time
-// per topic").
+// Registration token model: Subscribe returns an opaque Token. Unsubscribe
+// removes exactly the handler identified by that token; other handlers on the
+// same destination remain live. Removing the last handler for a destination
+// automatically cancels the transport subscription and exits the reader goroutine.
+// This replaces the unsound %p func-pointer duplicate-guard from phase 2 v1.
 package router
 
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
+	"sync/atomic"
 
 	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/message"
 	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
 )
 
-// Handler is invoked for each message on the subscribed destination.
-// Identical to fieldbus.Handler; redefined here to avoid a circular import.
+// Handler is the canonical callback type invoked for each message on a subscribed destination.
+// fieldbus.Handler is a type alias for this type; router is the leaf package so the canonical
+// declaration lives here, avoiding a circular import.
 type Handler func(headers map[string]string, body []byte)
 
-// handlerEntry wraps a Handler with an identity pointer for duplicate detection.
-type handlerEntry struct {
-	h       Handler
-	funcKey string // fmt.Sprintf("%p", h) captured at registration
-}
+// Token is an opaque handle returned by Subscribe. Pass it to Unsubscribe to
+// remove exactly the registered handler, leaving other handlers on the same
+// destination unaffected. Tokens are unique within a Router's lifetime.
+type Token uint64
 
-// destState holds the subscription and handler list for one destination.
+// destState holds the subscription and handler map for one destination.
 type destState struct {
 	sub      transport.Subscription
-	handlers []*handlerEntry
+	handlers map[Token]Handler
 }
 
 // Router dispatches inbound messages to per-destination handler lists.
@@ -68,9 +65,15 @@ type Router struct {
 	dests map[string]*destState
 	wg    sync.WaitGroup
 
-	// errSink receives the first error from any reader goroutine. Buffered so
-	// the goroutine never blocks on the send. The sink is not exposed in phase 2;
-	// a phase-3 caller that needs error propagation can read it.
+	// nextToken is a monotonic counter for generating unique registration tokens.
+	// Accessed via atomic to avoid requiring the mu lock just for token generation;
+	// the token is only inserted into the map under mu.
+	nextToken atomic.Uint64
+
+	// errSink receives errors from reader goroutines. Buffered to avoid blocking
+	// the goroutine on a transient burst. Drops are observable: the drop path
+	// logs via the logged-drop sentinel below rather than a bare default.
+	// TODO(GAG-009): expose Errors() <-chan error for full error propagation.
 	errSink chan error
 }
 
@@ -84,52 +87,58 @@ func New(conn transport.Conn) *Router {
 	}
 }
 
-// Subscribe registers h on destination. On the first Subscribe for a destination
-// a transport.Subscription is created and a reader goroutine is started. Subsequent
-// calls for the same destination append the handler. Returns an error if h is
-// already registered on destination.
-func (r *Router) Subscribe(ctx context.Context, dest string, h Handler) error {
+// Subscribe registers h on destination and returns an opaque Token. Pass the
+// Token to Unsubscribe to remove this specific handler later. On the first
+// Subscribe for a destination a transport.Subscription is created and a reader
+// goroutine is started. Subsequent calls for the same destination append the
+// handler alongside existing ones. Each Subscribe call for the same handler
+// function produces a distinct Token and registers an additional invocation.
+func (r *Router) Subscribe(ctx context.Context, dest string, h Handler) (Token, error) {
+	tok := Token(r.nextToken.Add(1))
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	funcKey := funcPointerKey(h)
-
 	if state, exists := r.dests[dest]; exists {
-		// Destination already has a subscription: check for duplicate handler.
-		for _, e := range state.handlers {
-			if e.funcKey == funcKey {
-				return fmt.Errorf("router: handler already registered on %q", dest)
-			}
-		}
-		state.handlers = append(state.handlers, &handlerEntry{h: h, funcKey: funcKey})
-		return nil
+		// Destination already has a subscription: add another handler entry.
+		state.handlers[tok] = h
+		return tok, nil
 	}
 
 	// First subscribe for this destination: create the transport subscription and
 	// start the reader goroutine.
 	sub, err := r.conn.Subscribe(ctx, dest)
 	if err != nil {
-		return fmt.Errorf("router: subscribe %q: %w", dest, err)
+		return 0, fmt.Errorf("router: subscribe %q: %w", dest, err)
 	}
 	state := &destState{
 		sub:      sub,
-		handlers: []*handlerEntry{{h: h, funcKey: funcKey}},
+		handlers: map[Token]Handler{tok: h},
 	}
 	r.dests[dest] = state
 	r.wg.Add(1)
 	go r.readLoop(dest, sub)
-	return nil
+	return tok, nil
 }
 
-// Unsubscribe removes all handlers for dest and cancels the transport subscription.
-// Idempotent: unsubscribing a destination with no registered handlers returns nil.
-func (r *Router) Unsubscribe(_ context.Context, dest string) error {
+// Unsubscribe removes the single handler identified by token on destination.
+// If token is the last handler for destination, the transport subscription is
+// cancelled and the reader goroutine exits. Unsubscribing an unknown token or
+// an unknown destination is a no-op that returns nil.
+func (r *Router) Unsubscribe(_ context.Context, dest string, tok Token) error {
 	r.mu.Lock()
 	state, exists := r.dests[dest]
 	if !exists {
 		r.mu.Unlock()
 		return nil
 	}
+	delete(state.handlers, tok)
+	if len(state.handlers) > 0 {
+		// Other handlers remain: leave the subscription live.
+		r.mu.Unlock()
+		return nil
+	}
+	// Last handler removed: tear down the subscription.
 	delete(r.dests, dest)
 	sub := state.sub
 	r.mu.Unlock()
@@ -168,9 +177,13 @@ func (r *Router) readLoop(dest string, sub transport.Subscription) {
 	for msg := range sub.C() {
 		if msg.Err != nil {
 			// Error is terminal for this subscription (matches stomp.go:183-186).
+			err := fmt.Errorf("router: subscription error on %q: %w", dest, msg.Err)
 			select {
-			case r.errSink <- fmt.Errorf("router: subscription error on %q: %w", dest, msg.Err):
+			case r.errSink <- err:
 			default:
+				// errSink full: write to stderr so the drop is observable, not silent.
+				// TODO(GAG-009): expose Errors() <-chan error for full error propagation.
+				fmt.Fprintf(os.Stderr, "router: errSink full, dropped error: %v\n", err)
 			}
 			return
 		}
@@ -178,10 +191,12 @@ func (r *Router) readLoop(dest string, sub transport.Subscription) {
 		// handler does not block registrations on other destinations.
 		r.mu.Lock()
 		state := r.dests[dest]
-		var snapshot []*handlerEntry
+		var snapshot []Handler
 		if state != nil {
-			snapshot = make([]*handlerEntry, len(state.handlers))
-			copy(snapshot, state.handlers)
+			snapshot = make([]Handler, 0, len(state.handlers))
+			for _, h := range state.handlers {
+				snapshot = append(snapshot, h)
+			}
 		}
 		r.mu.Unlock()
 
@@ -191,17 +206,8 @@ func (r *Router) readLoop(dest string, sub transport.Subscription) {
 		headers := map[string]string{
 			message.HeaderDestination: dest,
 		}
-		for _, e := range snapshot {
-			e.h(headers, msg.Body)
+		for _, h := range snapshot {
+			h(headers, msg.Body)
 		}
 	}
-}
-
-// funcPointerKey returns a string that identifies a function value by its
-// code pointer. Two distinct func literals with the same implementation may
-// share an address only if the compiler de-duplicates them (rare and
-// implementation-specific). In the common case each func literal is unique.
-// This is the narrowest correct duplicate-guard available without reflect.
-func funcPointerKey(f Handler) string {
-	return fmt.Sprintf("%p", f)
 }

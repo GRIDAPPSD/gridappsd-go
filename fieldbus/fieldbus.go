@@ -15,6 +15,10 @@
 //   - Body is []byte, not auto-JSON-decoded. The Python router best-effort
 //     json.loads every message (goss.py:405-409); that couples transport to
 //     serialization. The bus stays byte-clean; JSON decode is the caller's concern.
+//   - Subscribe returns an opaque Token; Unsubscribe takes (dest, token) to
+//     remove one specific handler. This replaces the Python all-handlers-at-once
+//     unsubscribe shape with per-handler removal, and eliminates the unsound
+//     %p func-pointer duplicate guard from the initial implementation.
 //   - Subscribe/Unsubscribe operate over one transport.Subscription per destination
 //     (one reader goroutine per destination) rather than a single global listener,
 //     because the phase-1 transport.Msg carries no destination header. The
@@ -34,11 +38,20 @@ import (
 	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
 )
 
-// Handler is invoked for each message delivered to a subscribed destination.
+// Handler is the canonical callback type for message delivery.
+// It is invoked for each message delivered to a subscribed destination.
 // headers carries the STOMP frame headers as received; body is the raw frame body.
 // A Handler must not block the dispatch goroutine for long: offload slow work to
 // its own goroutine. A Handler is safe to call after its destination's Subscribe returns.
-type Handler func(headers map[string]string, body []byte)
+//
+// router.Handler is defined identically; fieldbus.Handler is the canonical declaration
+// and router.Handler is a type alias pointing here.
+type Handler = router.Handler
+
+// Token is an opaque handle returned by Subscribe. Pass it to Unsubscribe to
+// remove exactly that registered handler, leaving other handlers on the same
+// destination unaffected.
+type Token = router.Token
 
 // MessageBus is the Go equivalent of the Python FieldMessageBus abstract.
 // It is the public boundary the go-2664-gridappsd gateway codes against.
@@ -60,13 +73,15 @@ type MessageBus interface {
 	// The destination is normalized by the queue-prepend rule before use
 	// (see topics.NormalizeDestination). Multiple Subscribe calls on the same
 	// destination register additional handlers; each is invoked per message.
-	// Registering the same handler wrapper twice on one destination is an error.
-	Subscribe(ctx context.Context, destination string, h Handler) error
+	// Returns an opaque Token the caller passes to Unsubscribe to remove this
+	// specific handler. Each Subscribe call returns a distinct Token.
+	Subscribe(ctx context.Context, destination string, h Handler) (Token, error)
 
-	// Unsubscribe removes all handlers for destination and cancels the
-	// underlying transport subscription for it. Unsubscribing a destination
-	// with no registered handlers is a no-op that returns nil.
-	Unsubscribe(ctx context.Context, destination string) error
+	// Unsubscribe removes the single handler identified by tok on destination.
+	// When tok is the last handler for destination, the underlying transport
+	// subscription is cancelled. Unsubscribing an unknown token is a no-op
+	// that returns nil.
+	Unsubscribe(ctx context.Context, destination string, tok Token) error
 
 	// Send publishes body to destination as a fire-and-forget SEND. contentType
 	// sets the STOMP content-type header. The GOSS auth-subject headers are
@@ -94,7 +109,11 @@ type GridAPPSDMessageBus struct {
 	conn      transport.Conn // nil until Connect; nilled on Disconnect
 	rtr       *router.Router // nil until Connect; stopped on Disconnect
 	connected bool
-	token     string // GOSS auth token extracted after Connect
+	// subject carries the username (Config.User) stamped into GOSS_SUBJECT on
+	// every outbound SEND. It is NOT a secret: it identifies the authenticated
+	// session subject for the GOSS broker's ACL check. The password is never
+	// stored here; it is consumed by gridappsd.Connect and discarded.
+	subject string
 }
 
 // New returns an unconnected GridAPPSDMessageBus for the given config.
@@ -116,17 +135,13 @@ func (b *GridAPPSDMessageBus) Connect(ctx context.Context) error {
 	}
 	b.conn = conn
 	b.rtr = router.New(conn)
-	// The token from the two-step auth is the STOMP login credential for the
-	// durable connection. gridappsd.Connect does not expose it separately; the
-	// transport is already authenticated. GOSS_SUBJECT carries the token on
-	// every SEND so the broker can verify the subject on authenticated messages.
-	// We use the password field as the token source: Connect uses the token as
-	// the STOMP login (see auth.go:380-381), but does not return it. We stamp
-	// the config User as the subject because that is what the broker's ACL
-	// checks on a token-authed session: the token IS the user identity. If a
-	// later integration test shows otherwise, this is the narrowly-scoped change
-	// site. See GAG-004 open-item resolution in the phase-2 report.
-	b.token = b.cfg.User
+	// subject carries the username for GOSS_SUBJECT. The GOSS application layer
+	// requires the subject headers for ACL checks even on token-authenticated STOMP
+	// sessions (goss.py:174-176, 230-234). We stamp Config.User because that is the
+	// identity the broker's ACL checks on a token-authed session: the token IS the
+	// user identity. If a later integration test shows otherwise, this is the
+	// narrowly-scoped change site. See GAG-004 open-item resolution in the phase-2 report.
+	b.subject = b.cfg.User
 	b.connected = true
 	return nil
 }
@@ -161,19 +176,20 @@ func (b *GridAPPSDMessageBus) IsConnected() bool {
 }
 
 // Subscribe registers h to receive messages on destination (queue-normalized).
-func (b *GridAPPSDMessageBus) Subscribe(ctx context.Context, destination string, h Handler) error {
+// Returns an opaque Token identifying this registration.
+func (b *GridAPPSDMessageBus) Subscribe(ctx context.Context, destination string, h Handler) (Token, error) {
 	b.mu.Lock()
 	rtr := b.rtr
 	b.mu.Unlock()
 	if rtr == nil {
-		return fmt.Errorf("fieldbus subscribe: not connected")
+		return 0, fmt.Errorf("fieldbus subscribe: not connected")
 	}
 	dest := topics.NormalizeDestination(destination)
-	return rtr.Subscribe(ctx, dest, router.Handler(h))
+	return rtr.Subscribe(ctx, dest, h)
 }
 
-// Unsubscribe removes all handlers for destination.
-func (b *GridAPPSDMessageBus) Unsubscribe(ctx context.Context, destination string) error {
+// Unsubscribe removes the handler identified by tok on destination.
+func (b *GridAPPSDMessageBus) Unsubscribe(ctx context.Context, destination string, tok Token) error {
 	b.mu.Lock()
 	rtr := b.rtr
 	b.mu.Unlock()
@@ -181,7 +197,7 @@ func (b *GridAPPSDMessageBus) Unsubscribe(ctx context.Context, destination strin
 		return nil
 	}
 	dest := topics.NormalizeDestination(destination)
-	return rtr.Unsubscribe(ctx, dest)
+	return rtr.Unsubscribe(ctx, dest, tok)
 }
 
 // Send publishes body to destination as fire-and-forget, stamping GOSS auth-subject headers.
@@ -192,11 +208,11 @@ func (b *GridAPPSDMessageBus) Unsubscribe(ctx context.Context, destination strin
 // token IS the STOMP login on the durable leg, but the GOSS application layer
 // still requires the subject headers for its own ACL checks independent of the
 // STOMP-level authentication. Phase-2 mirrors that behavior: we stamp the user
-// identity (b.token) in both headers on every outbound Send.
+// identity (b.subject) in both headers on every outbound Send.
 func (b *GridAPPSDMessageBus) Send(ctx context.Context, destination, contentType string, body []byte) error {
 	b.mu.Lock()
 	conn := b.conn
-	token := b.token
+	subject := b.subject
 	b.mu.Unlock()
 	if conn == nil {
 		return fmt.Errorf("fieldbus send: not connected")
@@ -204,7 +220,7 @@ func (b *GridAPPSDMessageBus) Send(ctx context.Context, destination, contentType
 	dest := topics.NormalizeDestination(destination)
 	headers := map[string]string{
 		message.HeaderGossHasSubject: "true",
-		message.HeaderGossSubject:    token,
+		message.HeaderGossSubject:    subject,
 	}
 	return conn.Send(ctx, dest, contentType, body, headers)
 }
@@ -213,14 +229,14 @@ func (b *GridAPPSDMessageBus) Send(ctx context.Context, destination, contentType
 func (b *GridAPPSDMessageBus) GetResponse(ctx context.Context, destination, contentType string, body []byte) ([]byte, error) {
 	b.mu.Lock()
 	conn := b.conn
-	token := b.token
+	subject := b.subject
 	b.mu.Unlock()
 	if conn == nil {
 		return nil, fmt.Errorf("fieldbus get_response: not connected")
 	}
 	baseHeaders := map[string]string{
 		message.HeaderGossHasSubject: "true",
-		message.HeaderGossSubject:    token,
+		message.HeaderGossSubject:    subject,
 	}
 	return reqresp.GetResponse(ctx, conn, destination, contentType, body, baseHeaders)
 }

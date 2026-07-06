@@ -38,7 +38,7 @@ func TestGridAPPSDMessageBus_NotConnectedBehavior(t *testing.T) {
 	}
 
 	h := fieldbus.Handler(func(_ map[string]string, _ []byte) {})
-	if err := bus.Subscribe(ctx, "/queue/x", h); err == nil {
+	if _, err := bus.Subscribe(ctx, "/queue/x", h); err == nil {
 		t.Error("Subscribe on unconnected bus: want error, got nil")
 	}
 	if err := bus.Send(ctx, "/queue/x", "text/plain", []byte("body")); err == nil {
@@ -59,10 +59,12 @@ func dummyConfig() gridappsd.Config { return gridappsd.Config{} }
 
 // connFake is a minimal in-process transport.Conn for fieldbus tests.
 type connFake struct {
-	mu   sync.Mutex
-	sent []sentFrame
-	subs map[string]*subFake
-	disc bool
+	mu         sync.Mutex
+	sent       []sentFrame
+	subs       map[string]*subFake
+	disc       bool
+	sendNotify chan struct{} // closed after the first Send is recorded; nil = unused
+	sendOnce   sync.Once
 }
 
 type sentFrame struct {
@@ -92,6 +94,12 @@ func newConnFake() *connFake {
 	return &connFake{subs: make(map[string]*subFake)}
 }
 
+// newConnFakeWithNotify returns a connFake that closes sendNotify after the first Send.
+func newConnFakeWithNotify() (*connFake, chan struct{}) {
+	notify := make(chan struct{})
+	return &connFake{subs: make(map[string]*subFake), sendNotify: notify}, notify
+}
+
 func (c *connFake) Send(_ context.Context, dest, ct string, body []byte, headers map[string]string) error {
 	hCopy := make(map[string]string, len(headers))
 	for k, v := range headers {
@@ -101,7 +109,13 @@ func (c *connFake) Send(_ context.Context, dest, ct string, body []byte, headers
 	copy(bCopy, body)
 	c.mu.Lock()
 	c.sent = append(c.sent, sentFrame{dest, ct, bCopy, hCopy})
+	notify := c.sendNotify
 	c.mu.Unlock()
+
+	// Signal tests waiting for the first Send without time.Sleep.
+	if notify != nil {
+		c.sendOnce.Do(func() { close(notify) })
+	}
 	return nil
 }
 
@@ -191,7 +205,7 @@ func TestConnectedBus_SubscribeQueueNormalizes(t *testing.T) {
 	bus := fieldbus.NewForTest(conn, "user")
 	ctx := context.Background()
 
-	if err := bus.Subscribe(ctx, "bare.dest", fieldbus.Handler(func(_ map[string]string, _ []byte) {})); err != nil {
+	if _, err := bus.Subscribe(ctx, "bare.dest", fieldbus.Handler(func(_ map[string]string, _ []byte) {})); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
@@ -214,7 +228,7 @@ func TestConnectedBus_DisconnectClosesConnAndRouter(t *testing.T) {
 	ctx := context.Background()
 
 	const dest = "/queue/test.dest"
-	if err := bus.Subscribe(ctx, dest, fieldbus.Handler(func(_ map[string]string, _ []byte) {})); err != nil {
+	if _, err := bus.Subscribe(ctx, dest, fieldbus.Handler(func(_ map[string]string, _ []byte) {})); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
@@ -243,11 +257,12 @@ func TestConnectedBus_DisconnectClosesConnAndRouter(t *testing.T) {
 }
 
 // TestConnectedBus_GetResponse_DestNormalized asserts GetResponse normalizes the
-// request destination to /queue/ and the reply-to header is bare.
+// request destination to /queue/ and the reply-to header is bare. Uses SendNotify
+// to synchronize deterministically instead of a sleep-poll loop (GAG-002).
 func TestConnectedBus_GetResponse_DestNormalized(t *testing.T) {
 	t.Parallel()
 
-	conn := newConnFake()
+	conn, sendNotify := newConnFakeWithNotify()
 	bus := fieldbus.NewForTest(conn, "user")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -255,15 +270,11 @@ func TestConnectedBus_GetResponse_DestNormalized(t *testing.T) {
 	wantReply := []byte("the-reply")
 
 	go func() {
-		// Wait until the send is recorded, then deliver the reply.
-		for {
-			conn.mu.Lock()
-			n := len(conn.sent)
-			conn.mu.Unlock()
-			if n > 0 {
-				break
-			}
-			time.Sleep(time.Millisecond)
+		// Wait deterministically for the first Send to be recorded.
+		select {
+		case <-sendNotify:
+		case <-ctx.Done():
+			return
 		}
 		conn.mu.Lock()
 		last := conn.sent[len(conn.sent)-1]
@@ -321,7 +332,7 @@ func TestConnectedBus_IsConnectedIdempotentDisconnect(t *testing.T) {
 }
 
 // TestConnectedBus_Unsubscribe asserts Unsubscribe normalizes the destination and
-// removes the subscription from the router.
+// removes the subscription from the router when the last token is removed.
 func TestConnectedBus_Unsubscribe(t *testing.T) {
 	t.Parallel()
 
@@ -332,7 +343,8 @@ func TestConnectedBus_Unsubscribe(t *testing.T) {
 	const raw = "bare.dest"
 	const normalized = "/queue/bare.dest"
 
-	if err := bus.Subscribe(ctx, raw, fieldbus.Handler(func(_ map[string]string, _ []byte) {})); err != nil {
+	tok, err := bus.Subscribe(ctx, raw, fieldbus.Handler(func(_ map[string]string, _ []byte) {}))
+	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	sub := conn.subFor(normalized)
@@ -340,7 +352,7 @@ func TestConnectedBus_Unsubscribe(t *testing.T) {
 		t.Fatalf("sub not created for %s", normalized)
 	}
 
-	if err := bus.Unsubscribe(ctx, raw); err != nil {
+	if err := bus.Unsubscribe(ctx, raw, tok); err != nil {
 		t.Fatalf("Unsubscribe: %v", err)
 	}
 
@@ -349,12 +361,12 @@ func TestConnectedBus_Unsubscribe(t *testing.T) {
 	unsubbed := sub.unsubbed
 	sub.mu.Unlock()
 	if !unsubbed {
-		t.Error("transport subscription was not unsubscribed after Unsubscribe")
+		t.Error("transport subscription was not unsubscribed after Unsubscribe of last token")
 	}
 }
 
-// TestConnectedBus_UnsubscribeIdempotent asserts Unsubscribe on a nonexistent
-// destination returns nil (idempotent when not connected or no sub).
+// TestConnectedBus_UnsubscribeIdempotent asserts Unsubscribe with an unknown token
+// returns nil (idempotent).
 func TestConnectedBus_UnsubscribeIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -362,7 +374,7 @@ func TestConnectedBus_UnsubscribeIdempotent(t *testing.T) {
 	bus := fieldbus.NewForTest(conn, "user")
 	ctx := context.Background()
 
-	if err := bus.Unsubscribe(ctx, "/queue/nonexistent"); err != nil {
+	if err := bus.Unsubscribe(ctx, "/queue/nonexistent", fieldbus.Token(0)); err != nil {
 		t.Errorf("Unsubscribe on nonexistent dest: want nil, got %v", err)
 	}
 }
