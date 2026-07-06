@@ -93,6 +93,14 @@ func New(conn transport.Conn) *Router {
 // goroutine is started. Subsequent calls for the same destination append the
 // handler alongside existing ones. Each Subscribe call for the same handler
 // function produces a distinct Token and registers an additional invocation.
+//
+// ctx lifetime decision: ctx governs the transport.Conn.Subscribe call only.
+// The reader goroutine's lifetime is tied to the subscription channel (closed
+// by Unsubscribe or Close), NOT to ctx. A caller that cancels ctx after
+// Subscribe returns does not inadvertently tear down the subscription. This
+// mirrors the expected messaging pattern: subscribe once, receive indefinitely,
+// unsubscribe explicitly. If the caller wants a ctx-scoped subscription,
+// they call Unsubscribe in a goroutine that selects on their ctx.Done().
 func (r *Router) Subscribe(ctx context.Context, dest string, h Handler) (Token, error) {
 	tok := Token(r.nextToken.Add(1))
 
