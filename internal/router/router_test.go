@@ -50,10 +50,10 @@ func TestRouter_TwoHandlersSameDestination(t *testing.T) {
 		close(readyB)
 	})
 
-	if err := r.Subscribe(ctx, dest, handlerA); err != nil {
+	if _, err := r.Subscribe(ctx, dest, handlerA); err != nil {
 		t.Fatalf("Subscribe A: %v", err)
 	}
-	if err := r.Subscribe(ctx, dest, handlerB); err != nil {
+	if _, err := r.Subscribe(ctx, dest, handlerB); err != nil {
 		t.Fatalf("Subscribe B: %v", err)
 	}
 
@@ -103,12 +103,12 @@ func TestRouter_DispatchIsolation(t *testing.T) {
 	firedB := make(chan struct{}, 1)
 	firedA := make(chan struct{})
 
-	if err := r.Subscribe(ctx, destA, router.Handler(func(_ map[string]string, _ []byte) {
+	if _, err := r.Subscribe(ctx, destA, router.Handler(func(_ map[string]string, _ []byte) {
 		close(firedA)
 	})); err != nil {
 		t.Fatalf("Subscribe A: %v", err)
 	}
-	if err := r.Subscribe(ctx, destB, router.Handler(func(_ map[string]string, _ []byte) {
+	if _, err := r.Subscribe(ctx, destB, router.Handler(func(_ map[string]string, _ []byte) {
 		firedB <- struct{}{}
 	})); err != nil {
 		t.Fatalf("Subscribe B: %v", err)
@@ -133,9 +133,13 @@ func TestRouter_DispatchIsolation(t *testing.T) {
 	}
 }
 
-// TestRouter_DuplicateHandlerGuard asserts that registering the same handler
-// value twice on one destination returns an error and does not double-register.
-func TestRouter_DuplicateHandlerGuard(t *testing.T) {
+// TestRouter_SameHandlerSubscribedTwiceGetDistinctTokensBothFire proves the token
+// model correctly handles the same func value registered twice on one destination.
+// This is the case the old %p guard incorrectly rejected: two calls with the same
+// func value share the same code pointer, so %p gave a false duplicate. The token
+// model issues a distinct Token per call, so both registrations are live and both
+// handlers fire on each message.
+func TestRouter_SameHandlerSubscribedTwiceGetDistinctTokensBothFire(t *testing.T) {
 	t.Parallel()
 
 	fc := transporttest.NewFakeConn()
@@ -143,48 +147,112 @@ func TestRouter_DuplicateHandlerGuard(t *testing.T) {
 	ctx := context.Background()
 	dest := "/queue/dup.dest"
 
-	fireCount := 0
-	var mu sync.Mutex
-	ready := make(chan struct{})
+	var (
+		mu        sync.Mutex
+		fireCount int
+		allFired  = make(chan struct{})
+	)
 
+	// Same func value registered twice. Both must fire on each message.
 	h := router.Handler(func(_ map[string]string, _ []byte) {
 		mu.Lock()
 		fireCount++
-		if fireCount == 1 {
-			close(ready)
+		if fireCount == 2 {
+			close(allFired)
 		}
 		mu.Unlock()
 	})
 
-	if err := r.Subscribe(ctx, dest, h); err != nil {
+	tok1, err := r.Subscribe(ctx, dest, h)
+	if err != nil {
 		t.Fatalf("first Subscribe: %v", err)
 	}
-	if err := r.Subscribe(ctx, dest, h); err == nil {
-		t.Fatal("second Subscribe with same handler should return error, got nil")
+	tok2, err := r.Subscribe(ctx, dest, h)
+	if err != nil {
+		t.Fatalf("second Subscribe with same handler: want success (token model), got %v", err)
+	}
+	if tok1 == tok2 {
+		t.Errorf("both Subscribe calls returned the same token %v: tokens must be distinct", tok1)
 	}
 
 	fc.SubForDest(dest).Push(transport.Msg{Body: []byte("trigger")})
 
+	// Both handler registrations must fire.
 	select {
-	case <-ready:
+	case <-allFired:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for handler")
-	}
-
-	// Small window to detect a spurious second fire.
-	time.Sleep(20 * time.Millisecond)
-	mu.Lock()
-	got := fireCount
-	mu.Unlock()
-	if got != 1 {
-		t.Errorf("handler fired %d times, want exactly 1", got)
+		mu.Lock()
+		got := fireCount
+		mu.Unlock()
+		t.Fatalf("timed out: handler fired %d times, want 2", got)
 	}
 }
 
-// TestRouter_UnsubscribeRemovesHandlersAndGoroutineExits asserts that Unsubscribe
-// drops all handlers, calls the fake sub's Unsubscribe, and that the reader
-// goroutine exits cleanly (proved via WaitGroup in router.Close which we call
-// after unsubscribing all). Tested under -race.
+// TestRouter_UnsubscribeRemovesOneHandlerLeavesOtherLive proves that
+// Unsubscribe(dest, tok) removes only the handler identified by tok.
+// The second handler on the same destination continues to receive messages.
+func TestRouter_UnsubscribeRemovesOneHandlerLeavesOtherLive(t *testing.T) {
+	t.Parallel()
+
+	fc := transporttest.NewFakeConn()
+	r := router.New(fc)
+	ctx := context.Background()
+	dest := "/queue/partial.unsub"
+
+	firedA := make(chan struct{}, 4)
+	firedB := make(chan struct{}, 4)
+
+	tokA, err := r.Subscribe(ctx, dest, router.Handler(func(_ map[string]string, _ []byte) {
+		firedA <- struct{}{}
+	}))
+	if err != nil {
+		t.Fatalf("Subscribe A: %v", err)
+	}
+	if _, err := r.Subscribe(ctx, dest, router.Handler(func(_ map[string]string, _ []byte) {
+		firedB <- struct{}{}
+	})); err != nil {
+		t.Fatalf("Subscribe B: %v", err)
+	}
+
+	// First message: both handlers must fire.
+	fc.SubForDest(dest).Push(transport.Msg{Body: []byte("first")})
+	for _, ch := range []chan struct{}{firedA, firedB} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for both handlers on first message")
+		}
+	}
+
+	// Unsubscribe only handler A.
+	if err := r.Unsubscribe(ctx, dest, tokA); err != nil {
+		t.Fatalf("Unsubscribe A: %v", err)
+	}
+
+	// Second message: only handler B must fire; handler A must not.
+	fc.SubForDest(dest).Push(transport.Msg{Body: []byte("second")})
+	select {
+	case <-firedB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for handler B on second message")
+	}
+	select {
+	case <-firedA:
+		t.Error("handler A fired after its token was unsubscribed")
+	case <-time.After(20 * time.Millisecond):
+		// Correct: handler A did not fire.
+	}
+
+	// The transport subscription must still be live (B is still subscribed).
+	sub := fc.SubForDest(dest)
+	if sub.WasUnsubscribed() {
+		t.Error("transport subscription was closed when handler B is still registered")
+	}
+}
+
+// TestRouter_UnsubscribeRemovesHandlersAndGoroutineExits asserts that Unsubscribing
+// the last handler on a destination closes the transport subscription and the reader
+// goroutine exits cleanly. Tested under -race.
 func TestRouter_UnsubscribeRemovesHandlersAndGoroutineExits(t *testing.T) {
 	t.Parallel()
 
@@ -194,11 +262,10 @@ func TestRouter_UnsubscribeRemovesHandlersAndGoroutineExits(t *testing.T) {
 	dest := "/queue/unsub.dest"
 
 	fired := make(chan struct{}, 1)
-	h := router.Handler(func(_ map[string]string, _ []byte) {
+	tok, err := r.Subscribe(ctx, dest, router.Handler(func(_ map[string]string, _ []byte) {
 		fired <- struct{}{}
-	})
-
-	if err := r.Subscribe(ctx, dest, h); err != nil {
+	}))
+	if err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
@@ -208,8 +275,8 @@ func TestRouter_UnsubscribeRemovesHandlersAndGoroutineExits(t *testing.T) {
 		t.Fatal("no sub created for dest")
 	}
 
-	// Unsubscribe should close the channel (exit signal for reader goroutine).
-	if err := r.Unsubscribe(ctx, dest); err != nil {
+	// Unsubscribing the last handler should close the channel (exit signal for reader goroutine).
+	if err := r.Unsubscribe(ctx, dest, tok); err != nil {
 		t.Fatalf("Unsubscribe: %v", err)
 	}
 
@@ -250,15 +317,13 @@ func TestRouter_ErrorMsgIsTerminal(t *testing.T) {
 	dest := "/queue/err.dest"
 
 	handlerFired := make(chan struct{}, 1)
-	h := router.Handler(func(_ map[string]string, body []byte) {
+	if _, err := r.Subscribe(ctx, dest, router.Handler(func(_ map[string]string, body []byte) {
 		handlerFired <- struct{}{}
 		if body == nil {
 			// Should never happen: terminal error msgs must not invoke handlers with nil body.
 			panic("handler called with nil body on error msg")
 		}
-	})
-
-	if err := r.Subscribe(ctx, dest, h); err != nil {
+	})); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
@@ -299,7 +364,7 @@ func TestRouter_CloseWaitsForAllGoroutines(t *testing.T) {
 
 	for i := 0; i < numDests; i++ {
 		dest := "/queue/multi." + string(rune('a'+i))
-		if err := r.Subscribe(ctx, dest, router.Handler(func(_ map[string]string, _ []byte) {})); err != nil {
+		if _, err := r.Subscribe(ctx, dest, router.Handler(func(_ map[string]string, _ []byte) {})); err != nil {
 			t.Fatalf("Subscribe %s: %v", dest, err)
 		}
 	}
@@ -317,7 +382,7 @@ func TestRouter_CloseWaitsForAllGoroutines(t *testing.T) {
 }
 
 // TestRouter_UnsubscribeIdempotent asserts that unsubscribing a destination
-// with no registered handlers returns nil.
+// with no registered handlers (or an unknown token) returns nil.
 func TestRouter_UnsubscribeIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -325,7 +390,8 @@ func TestRouter_UnsubscribeIdempotent(t *testing.T) {
 	r := router.New(fc)
 	ctx := context.Background()
 
-	if err := r.Unsubscribe(ctx, "/queue/nonexistent"); err != nil {
+	// Unknown destination: no-op.
+	if err := r.Unsubscribe(ctx, "/queue/nonexistent", router.Token(0)); err != nil {
 		t.Errorf("Unsubscribe on nonexistent dest: want nil, got %v", err)
 	}
 }
