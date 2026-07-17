@@ -11,7 +11,10 @@ import (
 
 // TestConfig_Defaults verifies that zero-value Config fields get sane defaults
 // when Connect validates them. This is a unit-level check on the Config shape;
-// the actual dial is not performed (no live broker in CI).
+// the actual dial is not performed (no live broker in CI). A zero-value
+// Config (TLSConfig nil, AllowPlaintext false) is fail-closed: Connect
+// dials TLS. The full four-arm transport-selection contract is covered
+// directly in dial_test.go.
 func TestConfig_Defaults(t *testing.T) {
 	t.Parallel()
 
@@ -37,6 +40,29 @@ func TestConfig_Defaults(t *testing.T) {
 	}
 	// The error should not be a panic or internal nil-pointer; any non-nil
 	// error from the dial layer is acceptable here.
+}
+
+// TestConfig_AllowPlaintext verifies that Connect wires AllowPlaintext
+// through to the dial layer: a cancelled context still produces a clean
+// error (no live broker in CI), proving the plaintext path is reachable
+// through the public Config surface. The wire-level frame-flow proof for
+// this path lives in dial_test.go.
+func TestConfig_AllowPlaintext(t *testing.T) {
+	t.Parallel()
+
+	cfg := gridappsd.Config{
+		AllowPlaintext: true,
+		User:           "admin",
+		Password:       "admin",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := gridappsd.Connect(ctx, cfg)
+	if err == nil {
+		t.Fatal("expected error with cancelled context and no live broker")
+	}
 }
 
 // TestConfig_TLSConfig verifies that a caller-supplied *tls.Config is accepted
