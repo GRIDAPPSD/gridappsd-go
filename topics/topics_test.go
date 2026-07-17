@@ -3,7 +3,7 @@ package topics_test
 import (
 	"testing"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/topics"
+	"github.com/GRIDAPPSD/gridappsd-go/topics"
 )
 
 // TestNormalizeDestination verifies the queue-prepend rule mirrors goss.py:415-417.

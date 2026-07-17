@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/fieldbus"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/gridappsd"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/message"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/fieldbus"
+	"github.com/GRIDAPPSD/gridappsd-go/gridappsd"
+	"github.com/GRIDAPPSD/gridappsd-go/message"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // Compile-time assertion lives in fieldbus.go; verifying it compiles is sufficient.

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/gridappsd"
+	"github.com/GRIDAPPSD/gridappsd-go/gridappsd"
 )
 
 // TestConfig_Defaults verifies that zero-value Config fields get sane defaults

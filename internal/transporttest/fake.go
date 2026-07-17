@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"sync"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // SendRecord captures one outbound SEND frame for later assertion.

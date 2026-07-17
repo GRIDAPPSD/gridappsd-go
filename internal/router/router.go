@@ -37,8 +37,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/message"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/message"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // Handler is the canonical callback type invoked for each message on a subscribed destination.

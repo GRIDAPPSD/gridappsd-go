@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/internal/reqresp"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/internal/transporttest"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/message"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/internal/reqresp"
+	"github.com/GRIDAPPSD/gridappsd-go/internal/transporttest"
+	"github.com/GRIDAPPSD/gridappsd-go/message"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // waitAndReply is a test helper that blocks until the FakeConn records a send

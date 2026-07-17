@@ -15,9 +15,9 @@ import (
 	"net"
 	"time"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/internal/auth"
-	istormp "tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/internal/stomp"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/internal/auth"
+	istormp "github.com/GRIDAPPSD/gridappsd-go/internal/stomp"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // DefaultAddress is the default GOSS STOMP+TLS endpoint.

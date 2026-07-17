@@ -30,12 +30,12 @@ import (
 	"fmt"
 	"sync"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/gridappsd"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/internal/reqresp"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/internal/router"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/message"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/topics"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/gridappsd"
+	"github.com/GRIDAPPSD/gridappsd-go/internal/reqresp"
+	"github.com/GRIDAPPSD/gridappsd-go/internal/router"
+	"github.com/GRIDAPPSD/gridappsd-go/message"
+	"github.com/GRIDAPPSD/gridappsd-go/topics"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // Handler is the canonical callback type for message delivery.
