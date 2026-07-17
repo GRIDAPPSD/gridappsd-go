@@ -11,7 +11,10 @@ import (
 
 // TestConfig_Defaults verifies that zero-value Config fields get sane defaults
 // when Connect validates them. This is a unit-level check on the Config shape;
-// the actual dial is not performed (no live broker in CI).
+// the actual dial is not performed (no live broker in CI). A zero-value
+// TLSConfig means Connect dials plain TCP (the dev-broker default); the
+// wire-level plain-TCP and TLS dial paths are covered directly in
+// dial_test.go.
 func TestConfig_Defaults(t *testing.T) {
 	t.Parallel()
 
