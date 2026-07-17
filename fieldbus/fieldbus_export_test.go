@@ -1,8 +1,8 @@
 package fieldbus
 
 import (
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/internal/router"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/internal/router"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // NewForTest constructs a GridAPPSDMessageBus in the already-connected state,

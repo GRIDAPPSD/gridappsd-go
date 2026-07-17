@@ -1,4 +1,4 @@
-module tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go
+module github.com/GRIDAPPSD/gridappsd-go
 
 go 1.24
 

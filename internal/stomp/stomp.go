@@ -13,7 +13,7 @@ import (
 	gostomp "github.com/go-stomp/stomp/v3"
 	"github.com/go-stomp/stomp/v3/frame"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // DefaultHeartBeat matches GRIDAPPSD_HEARTBEAT (10 s) used by the GridAPPS-D broker.

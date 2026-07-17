@@ -21,9 +21,9 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/message"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/topics"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/message"
+	"github.com/GRIDAPPSD/gridappsd-go/topics"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // GetResponse sends body to dest and waits for the first reply, bounded by ctx.

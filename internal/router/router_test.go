@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/internal/router"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/internal/transporttest"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/message"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/internal/router"
+	"github.com/GRIDAPPSD/gridappsd-go/internal/transporttest"
+	"github.com/GRIDAPPSD/gridappsd-go/message"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // TestRouter_TwoHandlersSameDestination asserts that two handlers registered on

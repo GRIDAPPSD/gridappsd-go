@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/internal/auth"
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/internal/auth"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // fakeToken is the synthetic token returned by the fakeConn subscription.

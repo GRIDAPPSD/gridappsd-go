@@ -12,7 +12,7 @@ import (
 	gostomp "github.com/go-stomp/stomp/v3"
 	"github.com/go-stomp/stomp/v3/frame"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 // fakeStompSub implements goStompSub for whitebox bridge tests without a live broker.

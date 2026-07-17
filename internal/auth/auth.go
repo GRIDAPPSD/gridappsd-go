@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"tanuki.pnnl.gov/gpa-grid-improvements/gridappsd-go/transport"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
 )
 
 const (
