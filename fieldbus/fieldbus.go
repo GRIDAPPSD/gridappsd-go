@@ -97,8 +97,27 @@ type MessageBus interface {
 	GetResponse(ctx context.Context, destination, contentType string, body []byte) ([]byte, error)
 }
 
-// Compile-time assertion: GridAPPSDMessageBus must satisfy MessageBus.
-var _ MessageBus = (*GridAPPSDMessageBus)(nil)
+// ErrorReporter is implemented by a MessageBus whose subscription failures can
+// be observed asynchronously. *GridAPPSDMessageBus implements it.
+//
+// It is a separate interface rather than a method on MessageBus so that adding
+// it does not break existing MessageBus implementations. A caller obtains it
+// with a type assertion:
+//
+//	if rep, ok := bus.(fieldbus.ErrorReporter); ok {
+//		go watchBusHealth(rep.Errors())
+//	}
+type ErrorReporter interface {
+	// Errors returns the channel on which terminal subscription failures are
+	// delivered. See GridAPPSDMessageBus.Errors for the delivery contract.
+	Errors() <-chan error
+}
+
+// Compile-time assertions: GridAPPSDMessageBus must satisfy both interfaces.
+var (
+	_ MessageBus    = (*GridAPPSDMessageBus)(nil)
+	_ ErrorReporter = (*GridAPPSDMessageBus)(nil)
+)
 
 // GridAPPSDMessageBus is the GOSS/STOMP concrete MessageBus. Construct with New;
 // it is not connected until Connect is called.
@@ -114,12 +133,33 @@ type GridAPPSDMessageBus struct {
 	// session subject for the GOSS broker's ACL check. The password is never
 	// stored here; it is consumed by gridappsd.Connect and discarded.
 	subject string
+
+	// errs is owned by the bus, not by the router, so it survives Disconnect and
+	// Connect. Each session's router publishes onto this one channel, which lets
+	// a health monitor hold a single channel for the life of the bus instead of
+	// re-fetching one per session and missing failures in between.
+	errs chan error
 }
 
 // New returns an unconnected GridAPPSDMessageBus for the given config.
 func New(cfg gridappsd.Config) *GridAPPSDMessageBus {
-	return &GridAPPSDMessageBus{cfg: cfg}
+	return &GridAPPSDMessageBus{
+		cfg:  cfg,
+		errs: make(chan error, router.ErrorChanBuffer),
+	}
 }
+
+// Errors returns the channel on which terminal subscription failures are
+// delivered: a broker error frame (wrapped, so errors.Is finds the broker's own
+// error) or an unexpected close (matching router.ErrSubscriptionClosed).
+// Teardown the bus performed itself, via Unsubscribe or Disconnect, is not
+// reported.
+//
+// The channel is valid for the life of the bus, including across a
+// Disconnect/Connect cycle, and is never closed. It is buffered; when the buffer
+// is full the oldest queued error is discarded to make room for the newest, so a
+// caller that wants every error drains it.
+func (b *GridAPPSDMessageBus) Errors() <-chan error { return b.errs }
 
 // Connect establishes the authenticated session and starts the dispatch machinery.
 // Idempotent: a second Connect on an already-connected bus returns nil immediately.
@@ -134,7 +174,7 @@ func (b *GridAPPSDMessageBus) Connect(ctx context.Context) error {
 		return fmt.Errorf("fieldbus connect: %w", err)
 	}
 	b.conn = conn
-	b.rtr = router.New(conn)
+	b.rtr = router.NewWithErrorChan(conn, b.errs)
 	// subject carries the username for GOSS_SUBJECT. The GOSS application layer
 	// requires the subject headers for ACL checks even on token-authenticated STOMP
 	// sessions (goss.py:174-176, 230-234). We stamp Config.User because that is the
