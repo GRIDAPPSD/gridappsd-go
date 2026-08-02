@@ -51,16 +51,19 @@ type NetDialer func(ctx context.Context) (io.ReadWriteCloser, error)
 // to the same GOSS broker. The credential leg is disconnected before the
 // durable leg is established.
 //
-// heartBeat is the STOMP heartbeat interval offered on both connections.
-// When zero, transport.Dialer implementations apply their own default.
+// heartBeat and heartBeats carry the STOMP heart-beat settings for both
+// connections; they are passed through to transport.ConnConfig unchanged, so
+// the resolution rule (heartBeats supersedes heartBeat when non-nil) lives in
+// exactly one place, the Dialer.
 func Exchange(
 	ctx context.Context,
 	netDial NetDialer,
 	d transport.Dialer,
 	user, pass string,
 	heartBeat time.Duration,
+	heartBeats *transport.HeartBeatIntervals,
 ) (transport.Conn, error) {
-	token, err := fetchToken(ctx, netDial, d, user, pass, heartBeat)
+	token, err := fetchToken(ctx, netDial, d, user, pass, heartBeat, heartBeats)
 	if err != nil {
 		return nil, fmt.Errorf("auth exchange: %w", err)
 	}
@@ -71,9 +74,10 @@ func Exchange(
 		return nil, fmt.Errorf("auth exchange second dial: %w", err)
 	}
 	conn2, err := d.Dial(ctx, rwc2, transport.ConnConfig{
-		Login:     token,
-		Passcode:  "",
-		HeartBeat: heartBeat,
+		Login:      token,
+		Passcode:   "",
+		HeartBeat:  heartBeat,
+		HeartBeats: heartBeats,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("auth exchange second connect: %w", err)
@@ -89,6 +93,7 @@ func fetchToken(
 	d transport.Dialer,
 	user, pass string,
 	heartBeat time.Duration,
+	heartBeats *transport.HeartBeatIntervals,
 ) (string, error) {
 	// Dial and STOMP-connect with real credentials.
 	rwc1, err := netDial(ctx)
@@ -96,9 +101,10 @@ func fetchToken(
 		return "", fmt.Errorf("credential dial: %w", err)
 	}
 	conn1, err := d.Dial(ctx, rwc1, transport.ConnConfig{
-		Login:     user,
-		Passcode:  pass,
-		HeartBeat: heartBeat,
+		Login:      user,
+		Passcode:   pass,
+		HeartBeat:  heartBeat,
+		HeartBeats: heartBeats,
 	})
 	if err != nil {
 		return "", fmt.Errorf("credential connect: %w", err)

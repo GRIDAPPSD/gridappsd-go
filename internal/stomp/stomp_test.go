@@ -230,12 +230,36 @@ func (p *pipeRWC) Close() error {
 	return nil
 }
 
+// fakeServerOpts configures the fake STOMP broker.
+type fakeServerOpts struct {
+	// connectedHeartBeat is the heart-beat header the broker returns in its
+	// CONNECTED frame, in "sx,sy" millisecond form. Empty means "0,0".
+	connectedHeartBeat string
+
+	// clientHeartBeat, when non-nil, receives the heart-beat header value the
+	// client sent on its CONNECT frame, so a test can assert on the negotiated
+	// wire values rather than on internal state. Must be buffered.
+	clientHeartBeat chan<- string
+
+	// quietOnSubscribe suppresses the canned MESSAGE the broker otherwise
+	// delivers on SUBSCRIBE. Heart-beat tests need a broker that says nothing
+	// after CONNECTED, because any received frame resets go-stomp's read timer.
+	quietOnSubscribe bool
+}
+
 // startFakeSTOMPServer starts a goroutine serving a minimal STOMP protocol
 // exchange and returns the client-side ReadWriteCloser. The server handles
 // CONNECT/SEND/SUBSCRIBE/UNSUBSCRIBE/DISCONNECT frames. For SUBSCRIBE it
 // delivers exactly one MESSAGE so the caller can verify receipt. Cleanup
 // is registered via t.Cleanup.
 func startFakeSTOMPServer(t *testing.T) *pipeRWC {
+	t.Helper()
+	return startFakeSTOMPServerOpts(t, fakeServerOpts{})
+}
+
+// startFakeSTOMPServerOpts is startFakeSTOMPServer with the broker's handshake
+// behavior under the test's control.
+func startFakeSTOMPServerOpts(t *testing.T, opts fakeServerOpts) *pipeRWC {
 	t.Helper()
 	cr, sw := io.Pipe() // client reads, server writes
 	sr, cw := io.Pipe() // server reads, client writes
@@ -247,6 +271,11 @@ func startFakeSTOMPServer(t *testing.T) *pipeRWC {
 		_ = cw.Close()
 	})
 
+	serverHB := opts.connectedHeartBeat
+	if serverHB == "" {
+		serverHB = "0,0"
+	}
+
 	go func() {
 		r := frame.NewReader(sr)
 		w := frame.NewWriter(sw)
@@ -256,12 +285,23 @@ func startFakeSTOMPServer(t *testing.T) *pipeRWC {
 		if err != nil || f == nil || f.Command != frame.CONNECT {
 			return
 		}
-		_ = w.Write(frame.New(frame.CONNECTED, frame.Version, "1.2", frame.HeartBeat, "0,0"))
+		if opts.clientHeartBeat != nil {
+			// Copy the value out rather than handing over the frame: the
+			// reader owns the frame's storage.
+			hb, _ := f.Header.Contains(frame.HeartBeat)
+			opts.clientHeartBeat <- hb
+		}
+		_ = w.Write(frame.New(frame.CONNECTED, frame.Version, "1.2", frame.HeartBeat, serverHB))
 
 		for {
 			f, err := r.Read()
-			if err != nil || f == nil {
+			if err != nil {
 				return
+			}
+			if f == nil {
+				// A nil frame with no error is an inbound heart-beat, not a
+				// disconnect. Keep serving.
+				continue
 			}
 			switch f.Command {
 			case frame.SEND:
@@ -269,6 +309,9 @@ func startFakeSTOMPServer(t *testing.T) *pipeRWC {
 					_ = w.Write(frame.New(frame.RECEIPT, frame.ReceiptId, id))
 				}
 			case frame.SUBSCRIBE:
+				if opts.quietOnSubscribe {
+					continue
+				}
 				// Deliver one message to exercise the Subscribe -> newSub -> bridge path.
 				subID, _ := f.Header.Contains(frame.Id)
 				dest, _ := f.Header.Contains(frame.Destination)
