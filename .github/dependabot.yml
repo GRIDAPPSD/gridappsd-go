@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # GitHub Actions version bumps: check for updates weekly. Matches the
+  # workspace convention (.claude/rules/devops.md "CI tooling currency")
+  # that every repo with workflows enables Dependabot github-actions so a
+  # Node-runtime deprecation or a stale action major surfaces as a PR
+  # rather than as a silent CI outage.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: tuesday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
