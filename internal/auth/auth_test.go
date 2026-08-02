@@ -140,7 +140,7 @@ func TestExchange_WireLevelInvariants(t *testing.T) {
 	dialer := newFakeDialer(conn1, conn2)
 
 	ctx := context.Background()
-	durableConn, err := auth.Exchange(ctx, netDialStub, dialer, user, pass, heartBeat)
+	durableConn, err := auth.Exchange(ctx, netDialStub, dialer, user, pass, heartBeat, nil)
 	if err != nil {
 		t.Fatalf("Exchange returned error: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestExchange_CtxCancelledBeforeToken(t *testing.T) {
 	// Cancel immediately; Exchange should not block.
 	cancel()
 
-	_, err := auth.Exchange(ctx, netDialStub, dialer, "u", "p", 10*time.Second)
+	_, err := auth.Exchange(ctx, netDialStub, dialer, "u", "p", 10*time.Second, nil)
 	if err == nil {
 		t.Fatal("expected error when context is cancelled, got nil")
 	}
@@ -281,7 +281,7 @@ func TestExchange_EmptyToken(t *testing.T) {
 	conn2 := newFakeConn("")
 	dialer := newFakeDialer(emptyConn, conn2)
 
-	_, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second)
+	_, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second, nil)
 	if err == nil {
 		t.Fatal("expected error for empty token, got nil")
 	}
@@ -346,7 +346,7 @@ func TestExchange_SubscriptionClosedBeforeToken(t *testing.T) {
 	conn2 := newFakeConn("")
 	dialer := newFakeDialer(conn1, conn2)
 
-	_, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second)
+	_, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second, nil)
 	if err == nil {
 		t.Fatal("expected error when subscription channel closes before token, got nil")
 	}
@@ -388,11 +388,60 @@ func TestExchange_TokenSubscriptionError(t *testing.T) {
 	conn2 := newFakeConn("")
 	dialer := newFakeDialer(conn1, conn2)
 
-	_, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second)
+	_, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second, nil)
 	if err == nil {
 		t.Fatal("expected error when broker delivers subscription error, got nil")
 	}
 	if !strings.Contains(err.Error(), brokerErr.Error()) {
 		t.Errorf("error should wrap broker error: want %q in %q", brokerErr.Error(), err.Error())
+	}
+}
+
+// TestExchange_HeartBeatSettingsReachBothLegs asserts that the heart-beat
+// configuration is applied to the credential leg AND the durable leg (GAG-013).
+// The credential leg is short-lived, but a read deadline armed on it can still
+// abort the token exchange, so both legs must carry the caller's intent.
+func TestExchange_HeartBeatSettingsReachBothLegs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		heartBeat  time.Duration
+		heartBeats *transport.HeartBeatIntervals
+	}{
+		{
+			// v0.1.0 callers: the symmetric field must still reach both legs.
+			name:      "symmetric interval",
+			heartBeat: 10 * time.Second,
+		},
+		{
+			name:       "send-only intervals",
+			heartBeat:  10 * time.Second,
+			heartBeats: &transport.HeartBeatIntervals{Send: 10 * time.Second},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dialer := newFakeDialer(newFakeConn(fakeToken), newFakeConn(""))
+			if _, err := auth.Exchange(context.Background(), netDialStub, dialer,
+				"u", "p", tc.heartBeat, tc.heartBeats); err != nil {
+				t.Fatalf("Exchange: %v", err)
+			}
+			if got := len(dialer.calls); got != 2 {
+				t.Fatalf("expected 2 Dial calls, got %d", got)
+			}
+			for i, cfg := range dialer.calls {
+				leg := []string{"credential", "durable"}[i]
+				if cfg.HeartBeat != tc.heartBeat {
+					t.Errorf("%s leg HeartBeat: got %v, want %v", leg, cfg.HeartBeat, tc.heartBeat)
+				}
+				if cfg.HeartBeats != tc.heartBeats {
+					t.Errorf("%s leg HeartBeats: got %+v, want %+v", leg, cfg.HeartBeats, tc.heartBeats)
+				}
+			}
+		})
 	}
 }

@@ -71,9 +71,31 @@ type Config struct {
 	// Password is the GOSS password used on the credential leg.
 	Password string
 
-	// HeartBeat is the STOMP heartbeat interval offered on both connection legs.
-	// Zero uses internal/stomp.DefaultHeartBeat (10 s).
+	// HeartBeat is the symmetric STOMP heartbeat interval offered on both
+	// connection legs: the same value in both directions. Zero uses
+	// internal/stomp.DefaultHeartBeat (10 s). Superseded by HeartBeats when
+	// that field is non-nil.
 	HeartBeat time.Duration
+
+	// HeartBeats, when non-nil, supersedes HeartBeat and sets the outgoing and
+	// incoming heartbeat intervals independently on both legs, with STOMP 1.2
+	// semantics: a zero in a direction disables that direction rather than
+	// selecting a default.
+	//
+	// The case this exists for is send-only heart-beating
+	// (HeartBeatIntervals{Send: d}): the client keeps proving liveness to the
+	// broker, but requires nothing back, so no read deadline is derived. That
+	// matters because go-stomp treats an expired read deadline as fatal to the
+	// whole connection, fanning an error to every subscription and
+	// disconnecting, which takes the publish path down with the receive path.
+	//
+	// Correctness note: requesting zero incoming does not guarantee go-stomp
+	// leaves its read timer disarmed. go-stomp raises the negotiated incoming
+	// interval to whatever the broker advertises it can send, ignoring the
+	// STOMP 1.2 rule that a zero from either party disables that direction. A
+	// broker that answers with a non-zero send interval therefore still arms
+	// the timer. See the characterization tests in internal/stomp.
+	HeartBeats *transport.HeartBeatIntervals
 }
 
 // Connect dials the GridAPPS-D broker (plain TCP or TLS, per cfg.TLSConfig
@@ -97,7 +119,7 @@ func Connect(ctx context.Context, cfg Config) (transport.Conn, error) {
 		return dial(ctx, cfg.Address, cfg.TLSConfig, cfg.AllowPlaintext)
 	}
 
-	conn, err := auth.Exchange(ctx, netDial, &istormp.Dialer{}, cfg.User, cfg.Password, cfg.HeartBeat)
+	conn, err := auth.Exchange(ctx, netDial, &istormp.Dialer{}, cfg.User, cfg.Password, cfg.HeartBeat, cfg.HeartBeats)
 	if err != nil {
 		return nil, fmt.Errorf("gridappsd connect to %s: %w", cfg.Address, err)
 	}

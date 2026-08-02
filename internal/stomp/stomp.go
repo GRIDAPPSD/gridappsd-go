@@ -30,16 +30,37 @@ const subChanBuf = 16
 // Wrap an already-dialed TLS net.Conn and this type handles the STOMP handshake.
 type Dialer struct{}
 
-// Dial performs the STOMP CONNECT handshake over rwc.
-// cfg.HeartBeat defaults to DefaultHeartBeat when zero.
-// ctx deadline, if set, is applied to rwc before the handshake and cleared
-// after; go-stomp's Connect has no built-in context support, so a cancelled ctx
-// without a deadline does not interrupt the handshake.
-func (d *Dialer) Dial(ctx context.Context, rwc io.ReadWriteCloser, cfg transport.ConnConfig) (transport.Conn, error) {
+// resolveHeartBeat returns the outgoing and incoming heart-beat intervals to
+// offer in the CONNECT frame.
+//
+// cfg.HeartBeats, when non-nil, is authoritative and is passed through
+// unchanged, zeros included: STOMP 1.2 defines a zero in a direction as
+// "disabled", so a caller who asks for no incoming heart-beat must not have a
+// default silently substituted for it.
+//
+// When cfg.HeartBeats is nil the v0.1.0 symmetric path applies exactly:
+// cfg.HeartBeat drives both directions, and a zero cfg.HeartBeat falls back to
+// DefaultHeartBeat.
+func resolveHeartBeat(cfg transport.ConnConfig) (send, recv time.Duration) {
+	if cfg.HeartBeats != nil {
+		return cfg.HeartBeats.Send, cfg.HeartBeats.Recv
+	}
 	hb := cfg.HeartBeat
 	if hb == 0 {
 		hb = DefaultHeartBeat
 	}
+	return hb, hb
+}
+
+// Dial performs the STOMP CONNECT handshake over rwc.
+// Heart-beat intervals come from cfg per resolveHeartBeat: symmetric from
+// cfg.HeartBeat by default, or independent per direction when cfg.HeartBeats
+// is set.
+// ctx deadline, if set, is applied to rwc before the handshake and cleared
+// after; go-stomp's Connect has no built-in context support, so a cancelled ctx
+// without a deadline does not interrupt the handshake.
+func (d *Dialer) Dial(ctx context.Context, rwc io.ReadWriteCloser, cfg transport.ConnConfig) (transport.Conn, error) {
+	sendHB, recvHB := resolveHeartBeat(cfg)
 	// Bound the synchronous STOMP CONNECT handshake using any deadline in ctx.
 	// go-stomp's Connect is not context-aware; applying a deadline on the
 	// underlying connection is the only mechanism to unblock a hung handshake.
@@ -66,7 +87,7 @@ func (d *Dialer) Dial(ctx context.Context, rwc io.ReadWriteCloser, cfg transport
 	}
 	c, err := gostomp.Connect(rwc,
 		gostomp.ConnOpt.Login(cfg.Login, cfg.Passcode),
-		gostomp.ConnOpt.HeartBeat(hb, hb),
+		gostomp.ConnOpt.HeartBeat(sendHB, recvHB),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("stomp connect: %w", err)
