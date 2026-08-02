@@ -1,0 +1,82 @@
+name: CI
+
+# GitHub-hosted runners are acceptable here: both jobs are read-only
+# verification (build, vet, test, and a gofmt formatting check), and
+# neither job deploys, pushes to a registry, or writes anything. See
+# .claude/rules/devops.md "GitHub Actions" in the Knowledge workspace
+# for the posture this exception follows.
+#
+# This module has no private GRIDAPPSD dependencies (see go.mod: only
+# github.com/go-stomp/stomp/v3, a public module), so no GitHub App
+# installation token is needed to resolve it, unlike the consuming
+# bridge repo gridappsd-ieee-2030_5-go. If a private dependency is
+# ever added here, port the token-minting steps from the bridge's
+# ci.yml rather than reinventing them.
+
+on:
+  push:
+    branches: [main]
+    # Doc-only changes do not affect build artifacts, so skip the full
+    # build/vet/test/gofmt matrix for them.
+    paths-ignore: ['**/*.md', 'docs/**', 'CHANGELOG.md']
+  pull_request:
+    branches: [main]
+    # See the push trigger comment above; the same rationale applies.
+    paths-ignore: ['**/*.md', 'docs/**', 'CHANGELOG.md']
+
+# Least-privilege baseline: neither job writes anything (no release, no
+# PR comment, no package publish), so the default token scope is
+# read-only rather than inheriting the repo or org default, which can
+# be write-all.
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build, vet, and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        run: go test -race ./...
+
+  gofmt:
+    name: gofmt check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: |
+          # This repo has no gofmt violations today (verified 2026-08-02
+          # against github/main at 1823402), so the check is
+          # unconditionally blocking. If a future vendored or
+          # generated file needs a carve-out, add it here narrowly and
+          # comment why, matching the pattern in ieee-2030_5-core-go's
+          # ci.yml gofmt job.
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt check passed."

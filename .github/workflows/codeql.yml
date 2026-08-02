@@ -1,0 +1,117 @@
+name: "CodeQL"
+
+# Static analysis for Go. This is the STOMP client library the
+# gridappsd-ieee-2030_5-go bridge depends on, and had no CI gate at
+# all before this workflow plus ci.yml; CodeQL adds a second,
+# independent signal (data-flow and taint analysis) alongside the
+# compiler-driven build/vet/test/gofmt checks in ci.yml.
+#
+# Runs on pull_request (so findings gate merge review) and on a weekly
+# schedule (so a newly-published CodeQL query pack catches something
+# in code that has not itself changed). Deliberately NOT on every push
+# to every branch: PRs into main are already gated, and a
+# push-triggered run on top of the PR run would double the analysis
+# cost for no additional signal. See .claude/rules/devops.md "GitHub
+# Actions" for the GitHub-hosted-runner posture this follows; this is
+# read-only static analysis with no deploy reach.
+#
+# GATED ON REPOSITORY VISIBILITY: GitHub Advanced Security (private-
+# repo code scanning) is an Enterprise product and is free only for
+# PUBLIC repos; this org is on GitHub Free. Rather than a workflow
+# that runs anyway and fails late on the SARIF upload (or worse,
+# `continue-on-error`s into a misleading green), the check-visibility
+# job below resolves this repo's actual visibility via the API (works
+# identically on every trigger, including `schedule`, where
+# `github.event.repository.visibility` does not exist) and the
+# analyze job is gated on it being "public". This is a SKIP, not
+# continue-on-error: a skipped job costs nothing and reports honestly.
+# Do not delete this job as dead config: it self-activates the day
+# this repo's visibility flips, with no further edits required. Same
+# pattern as ieee-2030_5-core-go's codeql.yml.
+#
+# permissions carries `actions: read` in addition to the
+# `contents: read` and `security-events: write` the CodeQL Action's
+# own README documents as the minimum for a private repo. The analyze
+# step's SARIF post-processing (fingerprinting alerts before upload)
+# calls `GET /repos/:owner/:repo/actions/runs/:run_id` to resolve the
+# workflow's relative path; without `actions: read` that call fails
+# with "Resource not accessible by integration" after the database
+# builds and the SARIF exports successfully. See ieee-2030_5-core-go's
+# codeql.yml header for the full derivation (first observed on that
+# repo's PR #12, run 30764072952).
+#
+# No GitHub App installation token is needed here: this module has no
+# private GRIDAPPSD dependencies for Autobuild to resolve (see ci.yml
+# header).
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 06:00 UTC. Catches newly-published CodeQL query-pack
+    # findings against code that has not itself changed.
+    - cron: '0 6 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  check-visibility:
+    name: Check repository visibility
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      is_public: ${{ steps.visibility.outputs.is_public }}
+    steps:
+      - name: Resolve repository visibility
+        # Queries the API directly rather than reading
+        # github.event.repository.visibility: that field exists on
+        # pull_request and push payloads but not on schedule, and this
+        # workflow's weekly cron run has no repository payload to read
+        # it from at all. The API call works identically on every
+        # trigger. github.token (the default GITHUB_TOKEN) can always
+        # read this repository's own visibility; no elevated
+        # permission or App token is needed for this one read.
+        id: visibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          visibility=$(gh api "repos/${{ github.repository }}" --jq .visibility)
+          echo "Repository visibility: $visibility"
+          if [ "$visibility" = "public" ]; then
+            echo "is_public=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_public=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  analyze:
+    name: Analyze (Go)
+    needs: check-visibility
+    # Skip, not continue-on-error: see the header comment above.
+    if: needs.check-visibility.outputs.is_public == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: go
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:go"
