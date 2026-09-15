@@ -36,24 +36,42 @@ terminator in front of it.
 ```go
 import (
 	"context"
+	"time"
 
 	"github.com/GRIDAPPSD/gridappsd-go/gridappsd"
 )
 
+// Connect blocks on the TLS dial and the GOSS token exchange; bound the
+// context so a broker that accepts the connection but never answers cannot
+// hang forever.
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
 // Fail-closed default: dials TLS.
-conn, err := gridappsd.Connect(context.Background(), gridappsd.Config{
+conn, err := gridappsd.Connect(ctx, gridappsd.Config{
 	Address:  "gridappsd.example.org:61613",
 	User:     "system",
 	Password: "manager",
 })
+if err != nil {
+	// handle error
+}
+defer conn.Disconnect()
 
 // Explicit opt-in for a plaintext dev broker.
-devConn, err := gridappsd.Connect(context.Background(), gridappsd.Config{
+devCtx, devCancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer devCancel()
+
+devConn, err := gridappsd.Connect(devCtx, gridappsd.Config{
 	Address:        "localhost:61613",
 	User:           "system",
 	Password:       "manager",
 	AllowPlaintext: true,
 })
+if err != nil {
+	// handle error
+}
+defer devConn.Disconnect()
 ```
 
 `Connect` returns a `transport.Conn`. Most callers instead construct a
@@ -85,7 +103,9 @@ if err != nil {
 }
 defer bus.Unsubscribe(context.Background(), "/topic/goss.gridappsd.field.output", token)
 
-err = bus.Send(context.Background(), "/topic/goss.gridappsd.field.input", "application/json", []byte(`{}`))
+if err := bus.Send(context.Background(), "/topic/goss.gridappsd.field.input", "application/json", []byte(`{}`)); err != nil {
+	// handle error
+}
 ```
 
 A destination with no `/topic/`, `/queue/`, or `/temp-queue/` prefix is
@@ -94,13 +114,20 @@ treated as a queue automatically (`topics.NormalizeDestination`).
 ### Request and reply
 
 ```go
-reply, err := bus.GetResponse(context.Background(),
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+reply, err := bus.GetResponse(ctx,
 	"goss.gridappsd.process.request.status.platform", "application/json", []byte(`{}`))
+if err != nil {
+	// handle error
+}
 ```
 
 `GetResponse` sends `body` with a temporary reply-to destination and returns
 the first reply, bounded by the context deadline: there is no separate
-timeout argument.
+timeout argument. `context.Background()` never expires, so a request nobody
+answers would block forever; bound it as shown above.
 
 ## Packages
 
