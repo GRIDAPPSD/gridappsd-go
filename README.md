@@ -4,9 +4,11 @@
 [![CodeQL](https://github.com/GRIDAPPSD/gridappsd-go/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/GRIDAPPSD/gridappsd-go/actions/workflows/github-code-scanning/codeql)
 [![Go 1.24](https://img.shields.io/badge/go-1.24-00ADD8?logo=go)](https://go.dev)
 
-A Go client library for GridAPPS-D / GOSS. It mirrors the gridappsd-python
-client API in idiomatic Go: connection and two-step token authentication,
-STOMP transport, publish/subscribe messaging, and correlated request/reply.
+A Go client library for GridAPPS-D / GOSS. It mirrors the connection and
+message-bus layer of the gridappsd-python client in idiomatic Go: connection
+and two-step token authentication, STOMP transport, publish/subscribe
+messaging, and correlated request/reply. The query API is not ported; see
+Status below.
 
 ## Status
 
@@ -31,11 +33,14 @@ Requires Go 1.24 or later.
 authentication. The zero-value `Config` is fail-closed: it dials TLS using
 the system trust store. Set `AllowPlaintext: true` to opt into a plain TCP
 connection, for example against a local development broker that has no TLS
-terminator in front of it.
+terminator in front of it. A plaintext connection sends the connect
+credentials and the GOSS auth token unencrypted on the wire, so only opt in
+against a broker and network path you trust.
 
 ```go
 import (
 	"context"
+	"os"
 	"time"
 
 	"github.com/GRIDAPPSD/gridappsd-go/gridappsd"
@@ -43,15 +48,17 @@ import (
 
 // Connect blocks on the TLS dial and the GOSS token exchange; bound the
 // context so a broker that accepts the connection but never answers cannot
-// hang forever.
+// hang forever. Read credentials from the environment: the platform's
+// default "manager" password must be changed on any broker beyond local
+// development.
 ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 defer cancel()
 
 // Fail-closed default: dials TLS.
 conn, err := gridappsd.Connect(ctx, gridappsd.Config{
 	Address:  "gridappsd.example.org:61613",
-	User:     "system",
-	Password: "manager",
+	User:     os.Getenv("GRIDAPPSD_USER"),
+	Password: os.Getenv("GRIDAPPSD_PASSWORD"),
 })
 if err != nil {
 	// handle error
@@ -64,8 +71,8 @@ defer devCancel()
 
 devConn, err := gridappsd.Connect(devCtx, gridappsd.Config{
 	Address:        "localhost:61613",
-	User:           "system",
-	Password:       "manager",
+	User:           os.Getenv("GRIDAPPSD_USER"),
+	Password:       os.Getenv("GRIDAPPSD_PASSWORD"),
 	AllowPlaintext: true,
 })
 if err != nil {
@@ -84,12 +91,16 @@ request/reply routing.
 import (
 	"context"
 	"log"
+	"os"
 
 	"github.com/GRIDAPPSD/gridappsd-go/fieldbus"
 	"github.com/GRIDAPPSD/gridappsd-go/gridappsd"
 )
 
-bus := fieldbus.New(gridappsd.Config{User: "system", Password: "manager"})
+bus := fieldbus.New(gridappsd.Config{
+	User:     os.Getenv("GRIDAPPSD_USER"),
+	Password: os.Getenv("GRIDAPPSD_PASSWORD"),
+})
 if err := bus.Connect(context.Background()); err != nil {
 	// handle error
 }
@@ -115,6 +126,10 @@ if err != nil {
 }
 defer bus.Unsubscribe(context.Background(), "/topic/goss.gridappsd.field.output", token)
 
+// Field output carries measurements and events out of the field or
+// simulation; field input carries messages, including control commands,
+// into it. Do not publish to field input against a live deployment unless
+// that is what's intended.
 if err := bus.Send(context.Background(), "/topic/goss.gridappsd.field.input", "application/json", []byte(`{}`)); err != nil {
 	// handle error
 }
