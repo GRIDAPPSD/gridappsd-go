@@ -9,9 +9,10 @@ import (
 	"github.com/GRIDAPPSD/gridappsd-go/topics"
 )
 
-// ExampleNew shows the guard every messaging method raises before Connect
-// succeeds. This example has no live GridAPPS-D broker to connect to, so it
-// only demonstrates the pre-Connect state.
+// ExampleNew shows the guard that Subscribe, Send, and GetResponse raise
+// before Connect succeeds (Unsubscribe on an unconnected bus is a no-op that
+// returns nil instead). This example has no live GridAPPS-D broker to
+// connect to, so it only demonstrates the pre-Connect state.
 func ExampleNew() {
 	bus := fieldbus.New(gridappsd.Config{User: "system", Password: "manager"})
 	fmt.Println("connected:", bus.IsConnected())
