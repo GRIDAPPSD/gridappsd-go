@@ -158,6 +158,7 @@ reply, err := bus.GetResponse(ctx,
 if err != nil {
 	// handle error
 }
+log.Println("platform status:", string(reply))
 ```
 
 `GetResponse` sends `body` with a temporary reply-to destination and returns
