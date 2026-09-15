@@ -92,6 +92,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"time"
 
 	"github.com/GRIDAPPSD/gridappsd-go/fieldbus"
 	"github.com/GRIDAPPSD/gridappsd-go/gridappsd"
@@ -101,7 +102,9 @@ bus := fieldbus.New(gridappsd.Config{
 	User:     os.Getenv("GRIDAPPSD_USER"),
 	Password: os.Getenv("GRIDAPPSD_PASSWORD"),
 })
-if err := bus.Connect(context.Background()); err != nil {
+connectCtx, connectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer connectCancel()
+if err := bus.Connect(connectCtx); err != nil {
 	// handle error
 }
 defer bus.Disconnect()
