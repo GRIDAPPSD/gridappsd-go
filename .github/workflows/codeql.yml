@@ -1,10 +1,10 @@
 name: "CodeQL"
 
-# Static analysis for Go. This is the STOMP client library the
-# gridappsd-ieee-2030_5-go bridge depends on, and had no CI gate at
-# all before this workflow plus ci.yml; CodeQL adds a second,
-# independent signal (data-flow and taint analysis) alongside the
-# compiler-driven build/vet/test/gofmt checks in ci.yml.
+# Static analysis for Go. This is a Go client library for GridAPPS-D,
+# and had no CI gate at all before this workflow plus ci.yml; CodeQL
+# adds a second, independent signal (data-flow and taint analysis)
+# alongside the compiler-driven build/vet/test/gofmt checks in
+# ci.yml.
 #
 # Runs on pull_request (so findings gate merge review) and on a weekly
 # schedule (so a newly-published CodeQL query pack catches something
@@ -15,24 +15,20 @@ name: "CodeQL"
 # Actions" for the GitHub-hosted-runner posture this follows; this is
 # read-only static analysis with no deploy reach.
 #
-# GATED ON REPOSITORY VISIBILITY: GitHub Advanced Security (private-
-# repo code scanning) is an Enterprise product and is free only for
-# PUBLIC repos; this org is on GitHub Free. Rather than a workflow
-# that runs anyway and fails late on the SARIF upload (or worse,
-# `continue-on-error`s into a misleading green), the check-visibility
-# job below resolves this repo's actual visibility via the API (works
-# identically on every trigger, including `schedule`, where
-# `github.event.repository.visibility` does not exist) and the
-# analyze job is gated on it being "public". This is a SKIP, not
-# continue-on-error: a skipped job costs nothing and reports honestly.
-# Do not delete this job as dead config: it self-activates the day
-# this repo's visibility flips, with no further edits required. Same
-# pattern as ieee-2030_5-core-go's codeql.yml.
+# GATED ON REPOSITORY VISIBILITY: GitHub Advanced Security (code
+# scanning) is free only for public repositories on GitHub Free. The
+# repository is public today, so the check-visibility job below
+# resolves "public" and the analyze job runs on every trigger. The
+# gate is kept, not removed: it self-activates correctly if
+# visibility is ever changed back, with no further edits needed here.
+# This is a SKIP, not continue-on-error: a skipped job costs nothing
+# and reports honestly. Same pattern as ieee-2030_5-core-go's
+# codeql.yml.
 #
 # permissions carries `actions: read` in addition to the
 # `contents: read` and `security-events: write` the CodeQL Action's
-# own README documents as the minimum for a private repo. The analyze
-# step's SARIF post-processing (fingerprinting alerts before upload)
+# own README documents as the minimum. The analyze step's SARIF
+# post-processing (fingerprinting alerts before upload)
 # calls `GET /repos/:owner/:repo/actions/runs/:run_id` to resolve the
 # workflow's relative path; without `actions: read` that call fails
 # with "Resource not accessible by integration" after the database
