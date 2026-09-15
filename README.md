@@ -83,6 +83,7 @@ request/reply routing.
 ```go
 import (
 	"context"
+	"log"
 
 	"github.com/GRIDAPPSD/gridappsd-go/fieldbus"
 	"github.com/GRIDAPPSD/gridappsd-go/gridappsd"
@@ -93,6 +94,17 @@ if err := bus.Connect(context.Background()); err != nil {
 	// handle error
 }
 defer bus.Disconnect()
+
+// Subscription failures (a broker error frame, or the peer closing the
+// subscription) arrive here, not as a return from Subscribe or Send. The
+// channel holds 16 entries; once full, the oldest unread error is dropped to
+// make room for the newest, so a caller that needs every failure must keep
+// this goroutine running for the life of the bus.
+go func() {
+	for err := range bus.Errors() {
+		log.Println("subscription error:", err)
+	}
+}()
 
 token, err := bus.Subscribe(context.Background(), "/topic/goss.gridappsd.field.output",
 	func(headers map[string]string, body []byte) {
