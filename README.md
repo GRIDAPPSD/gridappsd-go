@@ -111,14 +111,20 @@ defer bus.Disconnect()
 
 // Subscription failures (a broker error frame, or the peer closing the
 // subscription) arrive here, not as a return from Subscribe or Send. The
-// channel holds 16 entries; once full, the oldest unread error is dropped to
-// make room for the newest, so a caller that needs every failure must keep
-// this goroutine running for the life of the bus.
+// channel holds 16 entries and drops the oldest when full; it is never
+// closed, so the drain goroutine needs its own stop signal.
+done := make(chan struct{})
 go func() {
-	for err := range bus.Errors() {
-		log.Println("subscription error:", err)
+	for {
+		select {
+		case err := <-bus.Errors():
+			log.Println("subscription error:", err)
+		case <-done:
+			return
+		}
 	}
 }()
+defer close(done)
 
 token, err := bus.Subscribe(context.Background(), "/topic/goss.gridappsd.field.output",
 	func(headers map[string]string, body []byte) {
