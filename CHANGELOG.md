@@ -27,7 +27,13 @@ tags.
   later `Subscribe` call silently attach to a dead reader. This fixes the
   v0.1.0 known issue about dropped subscription errors and dead-destination
   reattachment. `fieldbus.GridAPPSDMessageBus` exposes this through the new
-  `fieldbus.ErrorReporter` interface.
+  `fieldbus.ErrorReporter` interface. Callers must drain `Errors()`
+  themselves: the channel is buffered to 16 entries, and once full the
+  oldest unread error is dropped to make room for the newest. The
+  peer-side-close sentinel, `router.ErrSubscriptionClosed`, lives under
+  `internal/`, so a caller outside this module cannot match it with
+  `errors.Is`; only the broker-error-frame case is distinguishable from
+  outside the module today.
 
 ### Known issues (carried from v0.1.0, not fixed)
 
@@ -54,7 +60,7 @@ Seeded from `.github/release-notes/v0.1.0.md`.
 - `internal/reqresp`: request/reply pattern over STOMP, matching correlated
   responses to pending requests.
 - `topics` and `message` packages: GridAPPS-D topic naming helpers and the
-  wire message envelope.
+  STOMP and GOSS header name constants.
 - Module path corrected to `github.com/GRIDAPPSD/gridappsd-go`.
 
 ### Known issues (not fixed in this release)
