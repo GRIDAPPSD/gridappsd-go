@@ -42,9 +42,11 @@ repository workflow.
 
 - Keep pull requests focused on one change.
 - Describe what changed and why in the pull request body.
-- A maintainer reviews and merges; the repository CI (build, vet, race test,
-  gofmt) and the organization's default setup code scanning must be green
-  first.
+- CI runs build, vet, race tests, gofmt, and the organization's default
+  setup code scanning on the pull request. `main` has no branch protection
+  or required status checks today, so none of these block a merge on their
+  own; a maintainer reviews the change and confirms the checks are green
+  before merging.
 
 ## License
 
