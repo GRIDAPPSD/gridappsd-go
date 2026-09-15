@@ -1,7 +1,7 @@
 # gridappsd-go
 
 [![Build, vet, and test](https://github.com/GRIDAPPSD/gridappsd-go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/GRIDAPPSD/gridappsd-go/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/GRIDAPPSD/gridappsd-go/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/GRIDAPPSD/gridappsd-go/actions/workflows/codeql.yml)
+[![CodeQL](https://github.com/GRIDAPPSD/gridappsd-go/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/GRIDAPPSD/gridappsd-go/actions/workflows/github-code-scanning/codeql)
 [![Go 1.24](https://img.shields.io/badge/go-1.24-00ADD8?logo=go)](https://go.dev)
 
 A Go client library for GridAPPS-D / GOSS. It mirrors the gridappsd-python

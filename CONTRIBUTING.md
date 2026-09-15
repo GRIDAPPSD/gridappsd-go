@@ -21,8 +21,9 @@ go test -race ./...
 ```
 
 These three commands are what CI runs on every pull request
-(`.github/workflows/ci.yml`), plus a `gofmt -l .` formatting check and a
-CodeQL static analysis pass (`.github/workflows/codeql.yml`).
+(`.github/workflows/ci.yml`), plus a `gofmt -l .` formatting check. CodeQL
+static analysis runs separately, through the GRIDAPPSD organization's
+default setup code scanning rather than a repository workflow.
 
 ## Before opening a pull request
 
@@ -39,8 +40,9 @@ CodeQL static analysis pass (`.github/workflows/codeql.yml`).
 
 - Keep pull requests focused on one change.
 - Describe what changed and why in the pull request body.
-- A maintainer reviews and merges; CI (build, vet, race test, gofmt, CodeQL)
-  must be green first.
+- A maintainer reviews and merges; the repository CI (build, vet, race test,
+  gofmt) and the organization's default setup code scanning must be green
+  first.
 
 ## License
 
