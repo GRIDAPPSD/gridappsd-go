@@ -20,10 +20,12 @@ go vet ./...
 go test -race ./...
 ```
 
-These three commands are what CI runs on every pull request
-(`.github/workflows/ci.yml`), plus a `gofmt -l .` formatting check. CodeQL
-static analysis runs separately, through the GRIDAPPSD organization's
-default setup code scanning rather than a repository workflow.
+These three commands are what CI runs on every pull request that changes
+more than markdown (`.github/workflows/ci.yml` skips a pull request whose
+diff is `*.md`, `docs/**`, or `CHANGELOG.md` only), plus a `gofmt -l .`
+formatting check. CodeQL static analysis runs separately, through the
+GRIDAPPSD organization's default setup code scanning rather than a
+repository workflow.
 
 ## Before opening a pull request
 
