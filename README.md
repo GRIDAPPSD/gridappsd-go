@@ -35,7 +35,11 @@ the system trust store. Set `AllowPlaintext: true` to opt into a plain TCP
 connection, for example against a local development broker that has no TLS
 terminator in front of it. A plaintext connection sends the connect
 credentials and the GOSS auth token unencrypted on the wire, so only opt in
-against a broker and network path you trust.
+against a broker and network path you trust. Connect and the examples below
+read `GRIDAPPSD_USER` and `GRIDAPPSD_PASSWORD` from the environment; neither
+is checked for emptiness before dialing, so an unset variable becomes an
+empty credential rather than a local error. Check your own environment first
+if a connection fails unexpectedly.
 
 ```go
 import (
@@ -98,6 +102,9 @@ import (
 	"github.com/GRIDAPPSD/gridappsd-go/gridappsd"
 )
 
+// No Address set: dials DefaultAddress ("localhost:61613") over TLS, the
+// fail-closed default; that port is the plaintext dev broker's port, so set
+// Address explicitly against a remote broker.
 bus := fieldbus.New(gridappsd.Config{
 	User:     os.Getenv("GRIDAPPSD_USER"),
 	Password: os.Getenv("GRIDAPPSD_PASSWORD"),
