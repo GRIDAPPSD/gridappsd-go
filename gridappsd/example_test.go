@@ -16,7 +16,7 @@ func ExampleConnect() {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := gridappsd.Connect(ctx, gridappsd.Config{User: "system", Password: "manager"})
+	_, err := gridappsd.Connect(ctx, gridappsd.Config{User: "system", Password: "example-password"})
 	fmt.Println("connect failed:", err != nil)
 	fmt.Println("failed due to cancellation:", errors.Is(err, context.Canceled))
 

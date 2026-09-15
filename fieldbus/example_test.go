@@ -14,7 +14,7 @@ import (
 // returns nil instead). This example has no live GridAPPS-D broker to
 // connect to, so it only demonstrates the pre-Connect state.
 func ExampleNew() {
-	bus := fieldbus.New(gridappsd.Config{User: "system", Password: "manager"})
+	bus := fieldbus.New(gridappsd.Config{User: "system", Password: "example-password"})
 	fmt.Println("connected:", bus.IsConnected())
 
 	h := fieldbus.Handler(func(_ map[string]string, _ []byte) {})
