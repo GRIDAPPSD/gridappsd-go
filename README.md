@@ -119,7 +119,9 @@ defer bus.Disconnect()
 // Subscription failures (a broker error frame, or the peer closing the
 // subscription) arrive here, not as a return from Subscribe or Send. The
 // channel holds 16 entries and drops the oldest when full; it is never
-// closed, so the drain goroutine needs its own stop signal.
+// closed, so the drain goroutine needs its own stop signal. On shutdown,
+// the select may pick done while errors are queued; drain the channel
+// again after close(done) if all errors must be seen.
 done := make(chan struct{})
 go func() {
 	for {
