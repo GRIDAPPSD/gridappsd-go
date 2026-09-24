@@ -1,24 +1,22 @@
 name: Release
 
 # Tag-driven release for this module. GitHub-hosted runners are
-# acceptable here per .claude/rules/devops.md's non-deploy-bearing
-# release-workflow carve-out: this job never SSHes to a deployment
-# target and never runs docker compose against a running environment.
+# acceptable here: this job never SSHes to a deployment target
+# and never runs docker compose against a running environment.
 # It validates a tagged commit builds and tests clean, then publishes
 # a GitHub release. There is no build artifact: this repo is a Go
 # library, consumed via `go get`, not a deployable binary.
 #
-# Dry-run-safe by default per .claude/rules/releasing.md Section 1: a
-# workflow_dispatch run with no input supplied defaults dry_run to
-# true, so an accidental manual trigger rehearses the pipeline without
-# creating a release. Only a real `v*` tag push, or an explicit
-# dry_run=false dispatch, publishes.
+# Dry-run-safe by default: a workflow_dispatch run with no input
+# supplied defaults dry_run to true, so an accidental manual trigger
+# rehearses the pipeline without creating a release. Only a real `v*`
+# tag push, or an explicit dry_run=false dispatch, publishes.
 #
 # This workflow owns release.yml only. CI (build/test/lint) and
 # CodeQL are Leon's lane in ci.yml and codeql.yml; this file does not
 # touch or duplicate them, and this workflow does not re-run the full
-# test suite beyond a final sanity build/test. Per releasing.md
-# Section 7, the required pre-merge gates (tests, review, CVE scan)
+# test suite beyond a final sanity build/test. Per releasing best
+# practices, the required pre-merge gates (tests, review, CVE scan)
 # are the release's foundation and are assumed green on main before a
 # tag is ever pushed.
 #
