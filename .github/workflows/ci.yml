@@ -2,9 +2,7 @@ name: CI
 
 # GitHub-hosted runners are acceptable here: both jobs are read-only
 # verification (build, vet, test, and a gofmt formatting check), and
-# neither job deploys, pushes to a registry, or writes anything. See
-# .claude/rules/devops.md "GitHub Actions" in the Knowledge workspace
-# for the posture this exception follows.
+# neither job deploys, pushes to a registry, or writes anything.
 #
 # This module has no private GRIDAPPSD dependencies (see go.mod: only
 # github.com/go-stomp/stomp/v3, a public module), so no GitHub App
