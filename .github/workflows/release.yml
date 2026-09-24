@@ -13,7 +13,7 @@ name: Release
 # tag push, or an explicit dry_run=false dispatch, publishes.
 #
 # This workflow owns release.yml only. CI (build/test/lint) and
-# CodeQL are Leon's lane in ci.yml and codeql.yml; this file does not
+# CodeQL are handled in ci.yml and codeql.yml; this file does not
 # touch or duplicate them, and this workflow does not re-run the full
 # test suite beyond a final sanity build/test. Per releasing best
 # practices, the required pre-merge gates (tests, review, CVE scan)
