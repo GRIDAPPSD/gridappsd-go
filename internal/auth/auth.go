@@ -92,9 +92,10 @@ func Exchange(
 	return conn2, nil
 }
 
-// endCredentialConn ends the credential connection and returns the
-// Unsubscribe error, nil once the teardown is done, or ctx.Err() if ctx is
-// done first; the teardown then carries on in the background.
+// endCredentialConn ends the credential connection. It returns nil once the
+// teardown is done, the Unsubscribe error, or, when ctx is done before the
+// teardown finishes, ctx.Err() wrapping any Unsubscribe error; the teardown
+// then carries on in the background.
 //
 // Once ctx is done rwc is closed, also under a pending UNSUBSCRIBE or
 // DISCONNECT: go-stomp then ends the subscription and wakes both receipt
@@ -118,26 +119,31 @@ func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, 
 		defer close(done)
 		defer stop()
 		if sub != nil && ctx.Err() == nil {
-			if err = unsubscribe(sub); err != nil && ctx.Err() != nil {
-				err = fmt.Errorf("%w: %w", ctx.Err(), err)
+			err = unsubscribe(sub)
+		}
+		if ctx.Err() == nil {
+			_ = conn.Disconnect()
+		}
+		// A step the close cut short reads as finished, so a done ctx is
+		// reported whichever of done and ctx.Done the caller sees first.
+		if cerr := ctx.Err(); cerr != nil {
+			if err != nil {
+				err = fmt.Errorf("%w: %w", cerr, err)
+			} else {
+				err = cerr
 			}
 		}
-		if ctx.Err() != nil {
-			return
-		}
-		_ = conn.Disconnect()
 	}()
 	select {
 	case <-done:
-		return err
 	case <-ctx.Done():
 		select {
 		case <-done:
-			return err
 		default:
 			return ctx.Err()
 		}
 	}
+	return err
 }
 
 // unsubscribe calls sub.Unsubscribe and reports a runtime panic from it as an

@@ -18,7 +18,10 @@ tags.
   after the call returns. An `Unsubscribe` error on the credential
   connection, including a runtime panic recovered from go-stomp, is no
   longer discarded: the exchange fails with a credential connection teardown
-  error that wraps it, even when a token arrived (#25).
+  error that wraps it, even when a token arrived. A context that ends while
+  that teardown is still running is now always reported as the teardown
+  error; before, the exchange could instead fail at the second dial with a
+  timeout error that did not wrap the context error (#25).
 
 ## [0.2.1] - 2026-09-30
 
