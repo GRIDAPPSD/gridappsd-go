@@ -8,6 +8,12 @@ tags.
 
 ## [Unreleased]
 
+### Added
+
+- `Config.Logger`, a `*slog.Logger` that receives failures `Connect`
+  reports without failing. Nil uses `slog.Default()`;
+  `slog.New(slog.DiscardHandler)` silences it (#25).
+
 ### Fixed
 
 - The token exchange's credential-connection teardown is now bounded by the
@@ -15,13 +21,15 @@ tags.
   for its receipt: the connection is closed when the context ends, which
   ends go-stomp's receipt wait, instead of holding the broker session, its
   socket and go-stomp goroutines for up to go-stomp's 30s receipt timeout
-  after the call returns. An `Unsubscribe` error on the credential
+  after the call returns. go-stomp can still keep a goroutine past that
+  close (#24). An `Unsubscribe` or `Disconnect` error on the credential
   connection, including a runtime panic recovered from go-stomp, is no
-  longer discarded: the exchange fails with a credential connection teardown
-  error that wraps it, even when a token arrived. A context that ends while
-  that teardown is still running is now always reported as the teardown
-  error; before, the exchange could instead fail at the second dial with a
-  timeout error that did not wrap the context error (#25).
+  longer discarded: once the token has arrived it is logged at warning
+  level through `Config.Logger`, under the `error` key, and the token is
+  still used. A context that ends while that teardown is still running
+  fails the exchange with a credential connection teardown error that wraps
+  the context error; before, the exchange could instead fail at the second
+  dial with a timeout error that did not wrap the context error (#25).
 
 ## [0.2.1] - 2026-09-30
 
