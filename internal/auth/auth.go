@@ -12,8 +12,9 @@
 //  4. Read the token from the subscription channel, bounded by ctx.
 //  5. End the first connection. (goss.py leaks this connection; we do not.)
 //     While ctx is live this is UNSUBSCRIBE then DISCONNECT, each waiting for
-//     its receipt; once ctx is done the transport is closed instead, and that
-//     teardown finishes in the background after Exchange has returned.
+//     its receipt. Once ctx is done the transport is closed, which also ends a
+//     pending receipt wait, so the teardown outlives ctx only by that close.
+//     An Unsubscribe error fails the exchange even when a token arrived.
 //  6. Open a SECOND STOMP connection: token as login, empty passcode.
 //
 // Re-auth: Exchange is stateless and re-entrant. Call it again with fresh
@@ -91,16 +92,15 @@ func Exchange(
 	return conn2, nil
 }
 
-// endCredentialConn ends the credential connection and returns nil once that
-// is done, or ctx.Err() if ctx is done first; the teardown then carries on in
-// the background.
+// endCredentialConn ends the credential connection and returns the
+// Unsubscribe error, nil once the teardown is done, or ctx.Err() if ctx is
+// done first; the teardown then carries on in the background.
 //
-// go-stomp v3.1.2 panics the process (send on closed channel) when the
-// connection closes under an Unsubscribe still waiting for its receipt and
-// that wait then times out. So the steps run in order in one goroutine, rwc is
-// never closed while Unsubscribe is pending, and once ctx is done nothing
-// waits on the broker: rwc is closed, which ends go-stomp's goroutines at once
-// rather than at its 30 s receipt timeout.
+// Once ctx is done rwc is closed, also under a pending UNSUBSCRIBE or
+// DISCONNECT: go-stomp then ends the subscription and wakes both receipt
+// waits, so the teardown outlives ctx only by that close, not by go-stomp's
+// 30 s receipt timeout. A go-stomp v3.1.2 panic from a receipt timeout racing
+// that close is recovered by unsubscribe and reported like any other error.
 func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, sub transport.Subscription) error {
 	if sub != nil {
 		// The subscription's forwarding goroutine blocks once its buffer is
@@ -111,27 +111,29 @@ func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, 
 			}
 		}()
 	}
+	stop := context.AfterFunc(ctx, func() { _ = rwc.Close() })
 	done := make(chan struct{})
+	var err error
 	go func() {
 		defer close(done)
+		defer stop()
 		if sub != nil && ctx.Err() == nil {
-			_ = unsubscribe(sub)
+			if err = unsubscribe(sub); err != nil && ctx.Err() != nil {
+				err = fmt.Errorf("%w: %w", ctx.Err(), err)
+			}
 		}
 		if ctx.Err() != nil {
-			_ = rwc.Close()
 			return
 		}
-		stop := context.AfterFunc(ctx, func() { _ = rwc.Close() })
-		defer stop()
 		_ = conn.Disconnect()
 	}()
 	select {
 	case <-done:
-		return nil
+		return err
 	case <-ctx.Done():
 		select {
 		case <-done:
-			return nil
+			return err
 		default:
 			return ctx.Err()
 		}
@@ -157,8 +159,8 @@ func unsubscribe(sub transport.Subscription) (err error) {
 
 // fetchToken performs the credential leg and returns the raw token string.
 // The credential connection is always ended, per endCredentialConn; if ctx is
-// done before that finishes, fetchToken returns an error naming the credential
-// connection even when a token arrived.
+// done before that finishes, or Unsubscribe fails, fetchToken returns an error
+// naming the credential connection even when a token arrived.
 func fetchToken(
 	ctx context.Context,
 	netDial NetDialer,

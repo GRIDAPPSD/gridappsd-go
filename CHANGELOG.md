@@ -8,6 +8,18 @@ tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- The token exchange's credential-connection teardown is now bounded by the
+  caller's context also when an UNSUBSCRIBE or DISCONNECT is already waiting
+  for its receipt: the connection is closed when the context ends, which
+  ends go-stomp's receipt wait, instead of holding the broker session, its
+  socket and go-stomp goroutines for up to go-stomp's 30s receipt timeout
+  after the call returns. An `Unsubscribe` error on the credential
+  connection, including a runtime panic recovered from go-stomp, is no
+  longer discarded: the exchange fails with a credential connection teardown
+  error that wraps it, even when a token arrived (#25).
+
 ## [0.2.1] - 2026-09-30
 
 ### Fixed

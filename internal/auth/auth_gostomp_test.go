@@ -50,7 +50,10 @@ type stompBroker struct {
 	t    *testing.T
 	ln   net.Listener
 	mode brokerMode
-	wg   sync.WaitGroup
+	// onFrame, when set, is called with each frame's command as it is read,
+	// before any reply is written.
+	onFrame func(cmd string)
+	wg      sync.WaitGroup
 
 	mu      sync.Mutex
 	conns   [][]*frame.Frame
@@ -59,11 +62,16 @@ type stompBroker struct {
 
 func startStompBroker(t *testing.T, mode brokerMode) *stompBroker {
 	t.Helper()
+	return startStompBrokerHook(t, mode, nil)
+}
+
+func startStompBrokerHook(t *testing.T, mode brokerMode, onFrame func(cmd string)) *stompBroker {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Skipf("cannot open a TCP listener on this host: %v", err)
 	}
-	b := &stompBroker{t: t, ln: ln, mode: mode}
+	b := &stompBroker{t: t, ln: ln, mode: mode, onFrame: onFrame}
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
@@ -144,6 +152,9 @@ func (b *stompBroker) serve(idx int, c net.Conn) {
 		b.mu.Lock()
 		b.conns[idx] = append(b.conns[idx], f)
 		b.mu.Unlock()
+		if b.onFrame != nil {
+			b.onFrame(f.Command)
+		}
 
 		var out []*frame.Frame
 		switch f.Command {
@@ -209,11 +220,10 @@ func silentExchange(t *testing.T, b *stompBroker) {
 }
 
 // TestExchange_SilentBrokerTeardownDoesNotPanic drives the token exchange
-// through real go-stomp against a broker that stalls after CONNECTED. A
-// teardown left waiting on an UNSUBSCRIBE receipt when its connection closes
-// panics the process inside go-stomp when that receipt timeout fires (30 s),
-// so the wait below outlasts it; a clean teardown leaves no goroutine behind
-// and returns at once.
+// through real go-stomp against a broker that stalls after CONNECTED. go-stomp
+// can panic on a closed connection when an UNSUBSCRIBE receipt timeout fires
+// (30 s), so the wait below outlasts it and an escaped panic fails the run; a
+// clean teardown leaves no goroutine behind and returns at once.
 func TestExchange_SilentBrokerTeardownDoesNotPanic(t *testing.T) {
 	b := startStompBroker(t, brokerSilent)
 	before := runtime.NumGoroutine()
@@ -346,6 +356,77 @@ func TestExchange_StalledUnsubscribeReceiptBoundedByContext(t *testing.T) {
 	}
 	if got := countOpenFDs(t); got > beforeFD {
 		t.Errorf("descriptor count %d, %v after Exchange returned, want at most %d", got, settle, beforeFD)
+	}
+}
+
+// TestExchange_ContextEndsAtEachTeardownStep cancels the caller's context at
+// the moment the broker reads each step of the credential leg, with the
+// step's receipt withheld or answered, so context expiry lands before, during
+// and racing each receipt wait. Every order must fail the exchange without a
+// panic, return promptly after the cancel, and leave no goroutine or socket.
+func TestExchange_ContextEndsAtEachTeardownStep(t *testing.T) {
+	const (
+		margin = 400 * time.Millisecond
+		settle = 2 * time.Second
+	)
+	cases := []struct {
+		name string
+		mode brokerMode
+		at   string
+	}{
+		{"before the token, at SEND", brokerAnswering, frame.SEND},
+		{"UNSUBSCRIBE pending, receipt withheld", brokerNoUnsubscribeReceipt, frame.UNSUBSCRIBE},
+		{"UNSUBSCRIBE pending, receipt answered", brokerAnswering, frame.UNSUBSCRIBE},
+		{"DISCONNECT pending, receipt withheld", brokerNoDisconnectReceipt, frame.DISCONNECT},
+		{"DISCONNECT pending, receipt answered", brokerAnswering, frame.DISCONNECT},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var (
+				once     sync.Once
+				cancelMu sync.Mutex
+				cancelAt time.Time
+			)
+			b := startStompBrokerHook(t, tc.mode, func(cmd string) {
+				if cmd == tc.at {
+					once.Do(func() {
+						cancelMu.Lock()
+						cancelAt = time.Now()
+						cancelMu.Unlock()
+						cancel()
+					})
+				}
+			})
+			beforeG, beforeFD := runtime.NumGoroutine(), countOpenFDs(t)
+
+			conn, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{})
+			returned := time.Now()
+			if err == nil {
+				_ = conn.Disconnect()
+				t.Fatal("Exchange returned nil error after its context was cancelled")
+			}
+			cancelMu.Lock()
+			at := cancelAt
+			cancelMu.Unlock()
+			if at.IsZero() {
+				t.Fatalf("broker never read %s; Exchange error = %v", tc.at, err)
+			}
+			if d := returned.Sub(at); d > margin {
+				t.Errorf("Exchange returned %v after the cancel, want at most %v", d, margin)
+			}
+			deadline := time.Now().Add(settle)
+			for (runtime.NumGoroutine() > beforeG || countOpenFDs(t) > beforeFD) && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if got := runtime.NumGoroutine(); got > beforeG {
+				t.Errorf("goroutine count %d, %v after Exchange returned, want at most %d", got, settle, beforeG)
+			}
+			if got := countOpenFDs(t); got > beforeFD {
+				t.Errorf("descriptor count %d, %v after Exchange returned, want at most %d", got, settle, beforeFD)
+			}
+		})
 	}
 }
 
