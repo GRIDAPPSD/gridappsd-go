@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,12 +48,19 @@ func newFakeConn(token string) *fakeConn {
 	}
 }
 
+// fakeSub closes its channel on Unsubscribe, as transport.Subscription
+// requires, so a reader draining C() is released.
 type fakeSub struct {
-	ch chan transport.Msg
+	ch   chan transport.Msg
+	once sync.Once
 }
 
 func (s *fakeSub) C() <-chan transport.Msg { return s.ch }
-func (s *fakeSub) Unsubscribe() error      { return nil }
+func (s *fakeSub) closeC()                 { s.once.Do(func() { close(s.ch) }) }
+func (s *fakeSub) Unsubscribe() error {
+	s.closeC()
+	return nil
+}
 
 func (c *fakeConn) Send(_ context.Context, dest, _ string, body []byte, headers map[string]string) error {
 	c.sends = append(c.sends, sentMsg{
@@ -330,9 +338,8 @@ type closedSubConn struct {
 }
 
 func (c *closedSubConn) Subscribe(_ context.Context, dest string) (transport.Subscription, error) {
-	ch := make(chan transport.Msg)
-	close(ch) // closed before any message is delivered
-	sub := &fakeSub{ch: ch}
+	sub := &fakeSub{ch: make(chan transport.Msg)}
+	sub.closeC() // closed before any message is delivered
 	c.fakeConn.subs[dest] = sub
 	return sub, nil
 }

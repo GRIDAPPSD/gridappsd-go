@@ -1,0 +1,324 @@
+package auth_test
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/go-stomp/stomp/v3/frame"
+
+	"github.com/GRIDAPPSD/gridappsd-go/internal/auth"
+	"github.com/GRIDAPPSD/gridappsd-go/internal/stomp"
+	"github.com/GRIDAPPSD/gridappsd-go/transport"
+)
+
+// brokerMode selects how stompBroker answers after CONNECTED.
+type brokerMode int
+
+const (
+	// brokerSilent answers CONNECT and then never writes again: no MESSAGE,
+	// no RECEIPT. This is a broker that accepted the login and then stalled.
+	brokerSilent brokerMode = iota
+	// brokerAnswering routes the token reply and answers every receipt.
+	brokerAnswering
+	// brokerNoDisconnectReceipt is brokerAnswering except that DISCONNECT is
+	// never answered: the broker stalls after handing out the token.
+	brokerNoDisconnectReceipt
+	// brokerFlood is brokerAnswering except that the token reply is followed
+	// by more messages on the reply queue than the client buffers hold.
+	brokerFlood
+)
+
+// floodExtra is how many messages brokerFlood sends after the token: more
+// than go-stomp's and the bridge's channel buffers (16 each) can absorb.
+const floodExtra = 64
+
+// stompBroker is an in-process TCP STOMP 1.2 broker, just enough of one for
+// the real go-stomp client behind internal/stomp to run the token exchange
+// against. It records the commands each connection sent, in order.
+type stompBroker struct {
+	t    *testing.T
+	ln   net.Listener
+	mode brokerMode
+	wg   sync.WaitGroup
+
+	mu      sync.Mutex
+	conns   [][]*frame.Frame
+	sockets []net.Conn
+}
+
+func startStompBroker(t *testing.T, mode brokerMode) *stompBroker {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot open a TCP listener on this host: %v", err)
+	}
+	b := &stompBroker{t: t, ln: ln, mode: mode}
+	b.wg.Add(1)
+	go func() {
+		defer b.wg.Done()
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			b.mu.Lock()
+			idx := len(b.conns)
+			b.conns = append(b.conns, nil)
+			b.sockets = append(b.sockets, c)
+			b.mu.Unlock()
+			b.wg.Add(1)
+			go func() {
+				defer b.wg.Done()
+				b.serve(idx, c)
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		// Close the server side too, so a client left hanging by a failed
+		// test cannot hold cleanup open.
+		_ = ln.Close()
+		b.mu.Lock()
+		for _, c := range b.sockets {
+			_ = c.Close()
+		}
+		b.mu.Unlock()
+		b.wg.Wait()
+	})
+	return b
+}
+
+// commands returns the commands connection idx has sent so far, in order.
+func (b *stompBroker) commands(idx int) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	if idx < len(b.conns) {
+		for _, f := range b.conns[idx] {
+			out = append(out, f.Command)
+		}
+	}
+	return out
+}
+
+// frameOf returns the first frame connection idx sent with command cmd.
+func (b *stompBroker) frameOf(idx int, cmd string) *frame.Frame {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, f := range b.conns[idx] {
+		if f.Command == cmd {
+			return f
+		}
+	}
+	return nil
+}
+
+func (b *stompBroker) dial(ctx context.Context) (io.ReadWriteCloser, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, "tcp", b.ln.Addr().String())
+}
+
+func (b *stompBroker) serve(idx int, c net.Conn) {
+	defer c.Close()
+	r := frame.NewReader(c)
+	w := frame.NewWriter(c)
+	subIDs := make(map[string]string) // destination -> subscription id
+	for {
+		f, err := r.Read()
+		if err != nil {
+			return
+		}
+		if f == nil {
+			continue // heart-beat
+		}
+		b.mu.Lock()
+		b.conns[idx] = append(b.conns[idx], f)
+		b.mu.Unlock()
+
+		var out []*frame.Frame
+		switch f.Command {
+		case frame.CONNECT, frame.STOMP:
+			out = append(out, frame.New(frame.CONNECTED, frame.Version, "1.2", frame.HeartBeat, "0,0"))
+		case frame.SUBSCRIBE:
+			subIDs[f.Header.Get(frame.Destination)] = f.Header.Get(frame.Id)
+		case frame.SEND:
+			if replyTo, ok := f.Header.Contains("reply-to"); ok && b.mode != brokerSilent {
+				dest := "/queue/" + replyTo
+				n := 1
+				if b.mode == brokerFlood {
+					n += floodExtra
+				}
+				for i := 0; i < n; i++ {
+					msg := frame.New(frame.MESSAGE,
+						frame.Destination, dest,
+						frame.Subscription, subIDs[dest],
+						frame.MessageId, strconv.Itoa(i))
+					msg.Body = []byte(fakeToken)
+					out = append(out, msg)
+				}
+			}
+		}
+		receipt, ok := f.Header.Contains(frame.Receipt)
+		answer := b.mode != brokerSilent && !(b.mode == brokerNoDisconnectReceipt && f.Command == frame.DISCONNECT)
+		if ok && answer {
+			out = append(out, frame.New(frame.RECEIPT, frame.ReceiptId, receipt))
+		}
+		for _, o := range out {
+			if err := w.Write(o); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// waitForGoroutines polls until the process goroutine count is back at or
+// below want, and fails the test if it is not by the deadline.
+func waitForGoroutines(t *testing.T, want int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for runtime.NumGoroutine() > want {
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutine count still %d after %v, want at most %d", runtime.NumGoroutine(), within, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// silentExchange runs one Exchange through the real go-stomp stack against a
+// silent broker, with a caller deadline far shorter than go-stomp's 30 s
+// receipt timeouts, and requires it to fail.
+func silentExchange(t *testing.T, b *stompBroker) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{}); err == nil {
+		t.Fatal("Exchange against a silent broker returned nil error")
+	}
+}
+
+// TestExchange_SilentBrokerTeardownDoesNotPanic drives the token exchange
+// through real go-stomp against a broker that stalls after CONNECTED. A
+// teardown left waiting on an UNSUBSCRIBE receipt when its connection closes
+// panics the process inside go-stomp when that receipt timeout fires (30 s),
+// so the wait below outlasts it; a clean teardown leaves no goroutine behind
+// and returns at once.
+func TestExchange_SilentBrokerTeardownDoesNotPanic(t *testing.T) {
+	b := startStompBroker(t, brokerSilent)
+	before := runtime.NumGoroutine()
+	for i := 0; i < 40; i++ {
+		silentExchange(t, b)
+	}
+	waitForGoroutines(t, before, 40*time.Second)
+}
+
+// TestExchange_SilentBrokerRetryLoopKeepsGoroutinesBounded retries the token
+// exchange against a broker that stalls after CONNECTED and requires the
+// goroutine count to be back at its starting value after every attempt, so a
+// per-attempt residue fails on the first attempt that leaves one. Once the
+// caller's deadline passes the transport is closed rather than left waiting on
+// go-stomp's 30 s receipt timeouts, so the in-flight bound is one attempt's
+// goroutines.
+func TestExchange_SilentBrokerRetryLoopKeepsGoroutinesBounded(t *testing.T) {
+	b := startStompBroker(t, brokerSilent)
+	before := runtime.NumGoroutine()
+	for i := 0; i < 20; i++ {
+		silentExchange(t, b)
+		waitForGoroutines(t, before, 2*time.Second)
+	}
+}
+
+// TestExchange_AnsweringBrokerFrameOrder checks, on the wire of the real
+// go-stomp stack, the frames each leg sends and that the credential leg ends
+// with UNSUBSCRIBE then DISCONNECT while the caller's deadline is live.
+func TestExchange_AnsweringBrokerFrameOrder(t *testing.T) {
+	b := startStompBroker(t, brokerAnswering)
+	before := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{})
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if err := conn.Disconnect(); err != nil {
+		t.Fatalf("durable Disconnect: %v", err)
+	}
+
+	want := []string{frame.CONNECT, frame.SUBSCRIBE, frame.SEND, frame.UNSUBSCRIBE, frame.DISCONNECT}
+	if got := b.commands(0); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("credential leg frames = %v, want %v", got, want)
+	}
+	want = []string{frame.CONNECT, frame.DISCONNECT}
+	if got := b.commands(1); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("durable leg frames = %v, want %v", got, want)
+	}
+	if got := b.frameOf(0, frame.CONNECT).Header.Get(frame.Login); got != "u" {
+		t.Errorf("credential CONNECT login = %q, want %q", got, "u")
+	}
+	if got := b.frameOf(1, frame.CONNECT).Header.Get(frame.Login); got != fakeToken {
+		t.Errorf("durable CONNECT login = %q, want the token %q", got, fakeToken)
+	}
+	subFrame, sendFrame := b.frameOf(0, frame.SUBSCRIBE), b.frameOf(0, frame.SEND)
+	if _, ok := subFrame.Header.Contains("reply-to"); ok {
+		t.Error("SUBSCRIBE carries a reply-to header; it belongs on SEND only")
+	}
+	if got, want := "/queue/"+sendFrame.Header.Get("reply-to"), subFrame.Header.Get(frame.Destination); got != want {
+		t.Errorf("SEND reply-to resolves to %q, want the subscribed destination %q", got, want)
+	}
+	waitForGoroutines(t, before, 5*time.Second)
+}
+
+// TestExchange_StalledDisconnectReceiptBoundedByContext runs the real stack
+// against a broker that hands out the token and then never answers
+// DISCONNECT: Exchange must return by the caller's deadline with an error
+// naming the credential connection, and closing the transport at that
+// deadline must end go-stomp's goroutines rather than its 30 s timeout.
+func TestExchange_StalledDisconnectReceiptBoundedByContext(t *testing.T) {
+	const (
+		ctxBudget = 300 * time.Millisecond
+		margin    = 400 * time.Millisecond
+	)
+	b := startStompBroker(t, brokerNoDisconnectReceipt)
+	before := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithTimeout(context.Background(), ctxBudget)
+	defer cancel()
+	start := time.Now()
+	_, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "credential connection teardown") {
+		t.Fatalf("Exchange error = %v, want credential connection teardown wrapping %v", err, context.DeadlineExceeded)
+	}
+	if elapsed > ctxBudget+margin {
+		t.Errorf("Exchange took %v, want at most %v", elapsed, ctxBudget+margin)
+	}
+	waitForGoroutines(t, before, 2*time.Second)
+}
+
+// TestExchange_FloodedReplyQueueDoesNotStallTeardown runs the real stack
+// against a broker that follows the token with more messages than the client
+// buffers hold. Unread, they would stall go-stomp's I/O loop so UNSUBSCRIBE is
+// never written and teardown waits on go-stomp's 30 s receipt timeout.
+func TestExchange_FloodedReplyQueueDoesNotStallTeardown(t *testing.T) {
+	b := startStompBroker(t, brokerFlood)
+	before := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{})
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if err := conn.Disconnect(); err != nil {
+		t.Fatalf("durable Disconnect: %v", err)
+	}
+	waitForGoroutines(t, before, 5*time.Second)
+}

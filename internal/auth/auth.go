@@ -10,7 +10,10 @@
 //     intercepts reply-to on SUBSCRIBE for a RabbitMQ-specific path that is
 //     incompatible with GOSS).
 //  4. Read the token from the subscription channel, bounded by ctx.
-//  5. DISCONNECT the first connection. (goss.py leaks this connection; we do not.)
+//  5. End the first connection. (goss.py leaks this connection; we do not.)
+//     While ctx is live this is UNSUBSCRIBE then DISCONNECT, each waiting for
+//     its receipt; once ctx is done the transport is closed instead, and that
+//     teardown finishes in the background after Exchange has returned.
 //  6. Open a SECOND STOMP connection: token as login, empty passcode.
 //
 // Re-auth: Exchange is stateless and re-entrant. Call it again with fresh
@@ -24,6 +27,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"time"
 
@@ -80,13 +84,81 @@ func Exchange(
 		HeartBeats: heartBeats,
 	})
 	if err != nil {
+		// go-stomp's Connect does not close rwc on a failed handshake.
+		_ = rwc2.Close()
 		return nil, fmt.Errorf("auth exchange second connect: %w", err)
 	}
 	return conn2, nil
 }
 
+// endCredentialConn ends the credential connection and returns nil once that
+// is done, or ctx.Err() if ctx is done first; the teardown then carries on in
+// the background.
+//
+// go-stomp v3.1.2 panics the process (send on closed channel) when the
+// connection closes under an Unsubscribe still waiting for its receipt and
+// that wait then times out. So the steps run in order in one goroutine, rwc is
+// never closed while Unsubscribe is pending, and once ctx is done nothing
+// waits on the broker: rwc is closed, which ends go-stomp's goroutines at once
+// rather than at its 30 s receipt timeout.
+func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, sub transport.Subscription) error {
+	if sub != nil {
+		// The subscription's forwarding goroutine blocks once its buffer is
+		// full, which would stall go-stomp's I/O loop and every receipt behind
+		// it. Read until the transport closes the channel.
+		go func() {
+			for range sub.C() {
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if sub != nil && ctx.Err() == nil {
+			_ = unsubscribe(sub)
+		}
+		if ctx.Err() != nil {
+			_ = rwc.Close()
+			return
+		}
+		stop := context.AfterFunc(ctx, func() { _ = rwc.Close() })
+		defer stop()
+		_ = conn.Disconnect()
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		select {
+		case <-done:
+			return nil
+		default:
+			return ctx.Err()
+		}
+	}
+}
+
+// unsubscribe calls sub.Unsubscribe and reports a runtime panic from it as an
+// error. go-stomp v3.1.2's Unsubscribe sends on its message channel after a
+// receipt timeout without checking whether that channel is already closed;
+// the call runs on a goroutine of ours, so the process can survive it.
+func unsubscribe(sub transport.Subscription) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			re, ok := r.(runtime.Error)
+			if !ok {
+				panic(r)
+			}
+			err = fmt.Errorf("unsubscribe: %w", re)
+		}
+	}()
+	return sub.Unsubscribe()
+}
+
 // fetchToken performs the credential leg and returns the raw token string.
-// The credential connection is disconnected before fetchToken returns.
+// The credential connection is always ended, per endCredentialConn; if ctx is
+// done before that finishes, fetchToken returns an error naming the credential
+// connection even when a token arrived.
 func fetchToken(
 	ctx context.Context,
 	netDial NetDialer,
@@ -94,7 +166,7 @@ func fetchToken(
 	user, pass string,
 	heartBeat time.Duration,
 	heartBeats *transport.HeartBeatIntervals,
-) (string, error) {
+) (token string, err error) {
 	// Dial and STOMP-connect with real credentials.
 	rwc1, err := netDial(ctx)
 	if err != nil {
@@ -107,12 +179,16 @@ func fetchToken(
 		HeartBeats: heartBeats,
 	})
 	if err != nil {
+		// go-stomp's Connect does not close rwc on a failed handshake.
+		_ = rwc1.Close()
 		return "", fmt.Errorf("credential connect: %w", err)
 	}
-	// Always disconnect the credential connection; goss.py leaks it, we do not.
-	// Error intentionally discarded: the credential leg is disposable once the
-	// token is received; Disconnect failure has no meaningful recovery path here.
-	defer func() { _ = conn1.Disconnect() }()
+	var sub transport.Subscription
+	defer func() {
+		if terr := endCredentialConn(ctx, rwc1, conn1, sub); terr != nil && err == nil {
+			token, err = "", fmt.Errorf("credential connection teardown: %w", terr)
+		}
+	}()
 
 	// Named temp reply destination. The subscribe uses the /queue/ prefix;
 	// the reply-to header on SEND uses the bare name (no prefix). GOSS routes
@@ -127,18 +203,14 @@ func fetchToken(
 	replyDest := fmt.Sprintf("%s%s-%s", replyDestPrefix, user, hex.EncodeToString(nonce[:]))
 	queueDest := "/queue/" + replyDest
 
-	// Subscribe BEFORE sending the request so no message is missed.
-	sub, err := conn1.Subscribe(ctx, queueDest)
+	// Subscribe BEFORE sending the request so no message is missed. The
+	// transport unsubscribes on its own when the Subscribe ctx is done, which
+	// would race endCredentialConn, so it gets a ctx that is never cancelled.
+	s, err := conn1.Subscribe(context.WithoutCancel(ctx), queueDest)
 	if err != nil {
 		return "", fmt.Errorf("token subscribe %q: %w", queueDest, err)
 	}
-	// Best-effort unsubscribe when fetchToken returns (success or error). On
-	// the success path the token has already been read and the subscription is
-	// spent; on the error path ctx is done or the subscription never delivered.
-	// Unsubscribe failure has no recovery path: the credential connection is
-	// disconnected by the sibling defer above, which terminates the underlying
-	// STOMP session regardless.
-	defer func() { _ = sub.Unsubscribe() }()
+	sub = s
 
 	// The payload is base64(user + ":" + password), exactly as goss.py does:
 	//   base64Str = base64.b64encode(userAuthStr.encode())  where userAuthStr = f"{user}:{pass}"
@@ -160,11 +232,11 @@ func fetchToken(
 		if msg.Err != nil {
 			return "", fmt.Errorf("token subscription error: %w", msg.Err)
 		}
-		token := strings.TrimSpace(string(msg.Body))
-		if token == "" {
+		tok := strings.TrimSpace(string(msg.Body))
+		if tok == "" {
 			return "", fmt.Errorf("broker returned empty token")
 		}
-		return token, nil
+		return tok, nil
 	case <-ctx.Done():
 		return "", fmt.Errorf("token exchange cancelled: %w", ctx.Err())
 	}
