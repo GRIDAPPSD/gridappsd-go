@@ -46,11 +46,27 @@ tags.
 - The token exchange (`internal/auth`) now closes the socket on every failed
   STOMP CONNECT, on both the credential leg and the token leg, instead of
   leaving it open until the garbage collector's finalizer eventually runs
-  one. Teardown of the credential connection is now bounded by the caller's
-  context: once the context is done, the connection is closed at once rather
-  than letting the deferred unsubscribe and disconnect wait out go-stomp's
-  30s receipt timeout, which could hold a silent broker's caller for up to
-  about 60s past its own deadline.
+  one. Teardown of the credential connection is bounded by the caller's
+  context only when the context is already done before the deferred
+  unsubscribe begins: it then closes the connection at once instead of
+  waiting on the broker. An UNSUBSCRIBE already pending when the context
+  ends is not interrupted and can still hold that broker session, and its
+  socket, open for up to go-stomp's 30s receipt timeout after the call
+  returns (#25).
+
+### Known issues (new in this release)
+
+- An `Unsubscribe` that outlives its connection can panic the process:
+  go-stomp v3.1.2 sends on a channel the connection has already closed. It
+  is reachable when a caller cancels the context it passed to `Subscribe`,
+  contrary to the router's documented contract that a cancelled context does
+  not tear down the subscription (#23).
+- A connection whose receipts go unanswered can leak one `go-stomp`
+  goroutine after it closes, with no public API on this module to close or
+  drain the underlying connection (#24).
+- A recovered panic in the token exchange's unsubscribe is discarded rather
+  than reported, and the teardown bound described above is real: a pending
+  `UNSUBSCRIBE` is not interrupted when the caller's context ends (#25).
 
 ### Known issues (carried from v0.1.0, not fixed)
 
@@ -84,14 +100,14 @@ Seeded from `.github/release-notes/v0.1.0.md`.
 
 - `transport.ConnConfig.HeartBeat` is symmetric: a consumer could not
   request independent send and receive heartbeat directions. Fixed in
-  Unreleased above (`HeartBeatIntervals`); the underlying `go-stomp`
-  limitation it was combined with remains, see Unreleased "Known issues".
+  [0.2.0] above (`HeartBeatIntervals`); the underlying `go-stomp`
+  limitation it was combined with remains, see [0.2.0] "Known issues".
 - Subscription errors in `internal/router`'s read loop were dropped into an
   unread sink, and a dead destination was left registered so a later
   `Subscribe` call could silently attach to an already-exited reader. Fixed
-  in Unreleased above.
+  in [0.2.0] above.
 - A third defect was in `go-stomp` itself and is third-party; not tracked in
-  this repository. Still present; see Unreleased "Known issues".
+  this repository. Still present; see [0.2.0] "Known issues".
 
 [Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.0...main
 [0.2.0]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.1.0...v0.2.0
