@@ -8,6 +8,8 @@ tags.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-30
+
 ### Added
 
 - `LICENSE.md` (BSD 2-Clause "Simplified" License) and `NOTICE.md` (Battelle
@@ -41,6 +43,14 @@ tags.
   `internal/`, so a caller outside this module cannot match it with
   `errors.Is`; only the broker-error-frame case is distinguishable from
   outside the module today.
+- The token exchange (`internal/auth`) now closes the socket on every failed
+  STOMP CONNECT, on both the credential leg and the token leg, instead of
+  leaving it open until the garbage collector's finalizer eventually runs
+  one. Teardown of the credential connection is now bounded by the caller's
+  context: once the context is done, the connection is closed at once rather
+  than letting the deferred unsubscribe and disconnect wait out go-stomp's
+  30s receipt timeout, which could hold a silent broker's caller for up to
+  about 60s past its own deadline.
 
 ### Known issues (carried from v0.1.0, not fixed)
 
@@ -83,5 +93,6 @@ Seeded from `.github/release-notes/v0.1.0.md`.
 - A third defect was in `go-stomp` itself and is third-party; not tracked in
   this repository. Still present; see Unreleased "Known issues".
 
-[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.1.0...main
+[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.0...main
+[0.2.0]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/GRIDAPPSD/gridappsd-go/releases/tag/v0.1.0
