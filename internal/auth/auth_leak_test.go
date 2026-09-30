@@ -396,3 +396,37 @@ func TestFetchToken_UnsubscribeErrorAfterCancelKeepsContextError(t *testing.T) {
 		}
 	}
 }
+
+// cancellingDisconnectConn is a fakeConn whose Disconnect cancels the
+// caller's context and then succeeds, as go-stomp's does when the transport
+// closes under a pending DISCONNECT.
+type cancellingDisconnectConn struct {
+	*fakeConn
+	cancel context.CancelFunc
+}
+
+func (c *cancellingDisconnectConn) Disconnect() error {
+	c.cancel()
+	return c.fakeConn.Disconnect()
+}
+
+// TestFetchToken_ContextEndingDuringDisconnectIsReported proves that a
+// Disconnect cut short by the end of the context fails the exchange with the
+// context error, whichever of the teardown and the context the exchange
+// observes first, rather than going on to the durable leg.
+func TestFetchToken_ContextEndingDuringDisconnectIsReported(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		conn1 := &cancellingDisconnectConn{fakeConn: newFakeConn(fakeToken), cancel: cancel}
+		dialer := newFakeDialer(conn1, newFakeConn(""))
+
+		_, err := auth.Exchange(ctx, netDialStub, dialer, "u", "p", 10*time.Second, nil)
+		cancel()
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "credential connection teardown") {
+			t.Fatalf("attempt %d: Exchange error = %v, want credential connection teardown wrapping %v", i, err, context.Canceled)
+		}
+		if len(dialer.calls) != 1 {
+			t.Fatalf("attempt %d: dialer called %d times, want 1", i, len(dialer.calls))
+		}
+	}
+}
