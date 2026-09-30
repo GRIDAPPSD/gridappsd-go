@@ -12,6 +12,13 @@ tags.
 
 - `LICENSE.md` (BSD 2-Clause "Simplified" License) and `NOTICE.md` (Battelle
   Memorial Institute attribution and disclaimer).
+- `gridappsd.DefaultHandshakeTimeout` (5s) bounds a TLS handshake when the
+  caller's context carries no deadline of its own; an explicit caller
+  deadline is honored as-is and never lengthened. On expiry, `Connect`
+  returns an error matching the new `gridappsd.ErrHandshakeTimeout` via
+  `errors.Is`, naming the likely cause: the peer accepted the TCP connection
+  but may not be speaking TLS, such as a plaintext broker on what the caller
+  believes is a TLS port.
 - `transport.HeartBeatIntervals` and `gridappsd.Config.HeartBeats`: the send
   and receive STOMP heartbeat directions can now be configured
   independently, rather than only symmetrically via `HeartBeat`. This

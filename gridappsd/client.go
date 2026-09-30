@@ -12,6 +12,7 @@ package gridappsd
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +27,31 @@ import (
 // plain TCP or TLS is controlled by Config.TLSConfig and
 // Config.AllowPlaintext, not by this address.
 const DefaultAddress = "localhost:61613"
+
+// DefaultHandshakeTimeout bounds a TLS handshake when the caller's context
+// carries no deadline of its own. It applies only to the handshake step,
+// after the TCP connection is already established: the TCP connect step is
+// unaffected and keeps whatever bound the caller's context already gave it.
+//
+// 5 seconds is sized for a handshake specifically, not for a whole connect:
+// by the time HandshakeContext runs, DNS resolution and routing are already
+// done, and what remains is a small, fixed number of round trips over an
+// already-open socket (ClientHello, ServerHello/Certificate, Finished). A
+// value sized for a whole connect would let the exact hang this bounds run
+// that much longer before failing legibly.
+const DefaultHandshakeTimeout = 5 * time.Second
+
+// handshakeTimeout is DefaultHandshakeTimeout, indirected through a
+// variable so a test can shrink it rather than waiting out the real
+// default.
+var handshakeTimeout = DefaultHandshakeTimeout
+
+// ErrHandshakeTimeout is returned, wrapped, when a TLS handshake does not
+// complete within the caller's deadline or, absent one,
+// DefaultHandshakeTimeout. Compare with errors.Is. The peer having accepted
+// the TCP connection but never completing the handshake is the fingerprint
+// of a plaintext broker on what the caller believes is a TLS port.
+var ErrHandshakeTimeout = errors.New("tls handshake did not complete: the peer accepted the TCP connection but may not be speaking TLS")
 
 // Config holds all parameters required to establish an authenticated GridAPPS-D connection.
 type Config struct {
@@ -187,10 +213,29 @@ func dialTLS(ctx context.Context, addr string, tlsCfg *tls.Config) (io.ReadWrite
 		cfg = clone
 	}
 
-	dialer := &tls.Dialer{Config: cfg}
-	netConn, err := dialer.DialContext(ctx, "tcp", addr)
+	var d net.Dialer
+	rawConn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("tls dial %q: %w", addr, err)
+		return nil, fmt.Errorf("tls dial %q: tcp connect: %w", addr, err)
 	}
-	return netConn, nil
+
+	// The handshake gets its own bound, applied only when the caller did
+	// not already give ctx a deadline: an explicit caller deadline is used
+	// as-is and is never lengthened by the default.
+	hsCtx := ctx
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		hsCtx, cancel = context.WithTimeout(ctx, handshakeTimeout)
+		defer cancel()
+	}
+
+	tlsConn := tls.Client(rawConn, cfg)
+	if err := tlsConn.HandshakeContext(hsCtx); err != nil {
+		_ = rawConn.Close()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("tls dial %q: %w: %w", addr, ErrHandshakeTimeout, err)
+		}
+		return nil, fmt.Errorf("tls dial %q: handshake: %w", addr, err)
+	}
+	return tlsConn, nil
 }

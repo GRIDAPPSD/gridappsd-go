@@ -41,6 +41,14 @@ is checked for emptiness before dialing, so an unset variable becomes an
 empty credential rather than a local error. Check your own environment first
 if a connection fails unexpectedly.
 
+If the TLS handshake itself does not complete, `Connect` returns an error
+matching `gridappsd.ErrHandshakeTimeout` (comparable with `errors.Is`) once
+either the caller's own deadline or, absent one,
+`gridappsd.DefaultHandshakeTimeout` (5s) is reached. The peer having
+accepted the TCP connection but never completing the handshake is the
+signature of a plaintext broker sitting on what the caller believes is a
+TLS port, such as the dev broker above without `AllowPlaintext` set.
+
 ```go
 import (
 	"context"
