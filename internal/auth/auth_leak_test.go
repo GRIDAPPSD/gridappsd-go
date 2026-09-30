@@ -352,3 +352,47 @@ func TestFetchToken_UnsubscribeErrorReported(t *testing.T) {
 		t.Errorf("dialer called %d times, want 1: the durable leg must not be dialed after a failed teardown", len(dialer.calls))
 	}
 }
+
+// cancellingSub is a fakeSub whose Unsubscribe cancels the caller's context
+// and then fails, as go-stomp's does when the transport closes under it.
+type cancellingSub struct {
+	*fakeSub
+	cancel context.CancelFunc
+}
+
+func (s *cancellingSub) Unsubscribe() error {
+	s.cancel()
+	s.fakeSub.closeC()
+	return errUnsubscribeFailed
+}
+
+type cancellingSubConn struct {
+	*fakeConn
+	cancel context.CancelFunc
+}
+
+func (c *cancellingSubConn) Subscribe(ctx context.Context, dest string) (transport.Subscription, error) {
+	sub, err := c.fakeConn.Subscribe(ctx, dest)
+	if err != nil {
+		return nil, err
+	}
+	return &cancellingSub{fakeSub: sub.(*fakeSub), cancel: c.cancel}, nil
+}
+
+// TestFetchToken_UnsubscribeErrorAfterCancelKeepsContextError proves that an
+// Unsubscribe failing once the context has ended still leaves the context
+// error matchable, whichever of the teardown and the context the exchange
+// observes first. The order is up to the scheduler, so it runs many times.
+func TestFetchToken_UnsubscribeErrorAfterCancelKeepsContextError(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		conn1 := &cancellingSubConn{fakeConn: newFakeConn(fakeToken), cancel: cancel}
+		dialer := newFakeDialer(conn1, newFakeConn(""))
+
+		_, err := auth.Exchange(ctx, netDialStub, dialer, "u", "p", 10*time.Second, nil)
+		cancel()
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "credential connection teardown") {
+			t.Fatalf("attempt %d: Exchange error = %v, want credential connection teardown wrapping %v", i, err, context.Canceled)
+		}
+	}
+}
