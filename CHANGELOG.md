@@ -8,6 +8,23 @@ tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- An `Unsubscribe` can no longer outlive its connection and panic the
+  process through go-stomp v3.1.2's send on a closed channel (#23).
+  `Disconnect` now waits for pending unsubscribes before closing the
+  connection, which can add up to go-stomp's 30s unsubscribe receipt
+  timeout when the broker stops answering, and an unsubscribe that begins
+  after `Disconnect` is refused with an error instead of reaching go-stomp.
+  A runtime panic from go-stomp's `Unsubscribe` is recovered and returned
+  as an error. The subscription bridge keeps draining go-stomp's channel
+  until go-stomp closes it, so an unsubscribe on a subscription with unread
+  messages no longer wedges the connection. The router no longer lets a
+  cancelled `Subscribe` context tear its subscription down, as its
+  documentation always stated. When the transport unsubscribes because the
+  `Subscribe` context ended, a later `Unsubscribe` call returns that
+  attempt's result.
+
 ## [0.2.0] - 2026-09-30
 
 ### Added
