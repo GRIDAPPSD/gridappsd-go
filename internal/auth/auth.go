@@ -12,8 +12,11 @@
 //  4. Read the token from the subscription channel, bounded by ctx.
 //  5. End the first connection. (goss.py leaks this connection; we do not.)
 //     While ctx is live this is UNSUBSCRIBE then DISCONNECT, each waiting for
-//     its receipt; once ctx is done the transport is closed instead, and that
-//     teardown finishes in the background after Exchange has returned.
+//     its receipt. Once ctx is done the transport is closed, which ends a
+//     pending receipt wait in the common case; go-stomp can still keep a
+//     goroutine past it (#24). A ctx that ends during the teardown fails the
+//     exchange. Any other teardown failure is logged, and a token that
+//     arrived is still used.
 //  6. Open a SECOND STOMP connection: token as login, empty passcode.
 //
 // Re-auth: Exchange is stateless and re-entrant. Call it again with fresh
@@ -25,8 +28,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"runtime"
 	"strings"
 	"time"
@@ -59,6 +64,9 @@ type NetDialer func(ctx context.Context) (io.ReadWriteCloser, error)
 // connections; they are passed through to transport.ConnConfig unchanged, so
 // the resolution rule (heartBeats supersedes heartBeat when non-nil) lives in
 // exactly one place, the Dialer.
+//
+// logger receives a credential connection teardown failure that does not fail
+// the exchange; nil means slog.Default().
 func Exchange(
 	ctx context.Context,
 	netDial NetDialer,
@@ -66,8 +74,12 @@ func Exchange(
 	user, pass string,
 	heartBeat time.Duration,
 	heartBeats *transport.HeartBeatIntervals,
+	logger *slog.Logger,
 ) (transport.Conn, error) {
-	token, err := fetchToken(ctx, netDial, d, user, pass, heartBeat, heartBeats)
+	if logger == nil {
+		logger = slog.Default()
+	}
+	token, err := fetchToken(ctx, netDial, d, user, pass, heartBeat, heartBeats, logger)
 	if err != nil {
 		return nil, fmt.Errorf("auth exchange: %w", err)
 	}
@@ -91,17 +103,18 @@ func Exchange(
 	return conn2, nil
 }
 
-// endCredentialConn ends the credential connection and returns nil once that
-// is done, or ctx.Err() if ctx is done first; the teardown then carries on in
-// the background.
+// endCredentialConn ends the credential connection. stepErr joins the
+// Unsubscribe and Disconnect errors, and ctxErr is ctx.Err() when ctx was done
+// by the end. If ctx is done first it returns at once with a nil stepErr, and
+// the teardown carries on in the background.
 //
-// go-stomp v3.1.2 panics the process (send on closed channel) when the
-// connection closes under an Unsubscribe still waiting for its receipt and
-// that wait then times out. So the steps run in order in one goroutine, rwc is
-// never closed while Unsubscribe is pending, and once ctx is done nothing
-// waits on the broker: rwc is closed, which ends go-stomp's goroutines at once
-// rather than at its 30 s receipt timeout.
-func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, sub transport.Subscription) error {
+// Once ctx is done rwc is closed, also under a pending UNSUBSCRIBE or
+// DISCONNECT, so go-stomp ends the subscription and wakes both receipt waits
+// instead of waiting out its 30 s receipt timeout. go-stomp can miss that
+// wakeup or stall a Disconnect on a closed connection, keeping a goroutine
+// past the close (#24). A go-stomp v3.1.2 panic from a receipt timeout racing
+// that close is recovered by unsubscribe and reported like any other error.
+func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, sub transport.Subscription) (stepErr, ctxErr error) {
 	if sub != nil {
 		// The subscription's forwarding goroutine blocks once its buffer is
 		// full, which would stall go-stomp's I/O loop and every receipt behind
@@ -111,31 +124,34 @@ func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, 
 			}
 		}()
 	}
+	stop := context.AfterFunc(ctx, func() { _ = rwc.Close() })
 	done := make(chan struct{})
+	var gotStep, gotCtx error
 	go func() {
 		defer close(done)
-		if sub != nil && ctx.Err() == nil {
-			_ = unsubscribe(sub)
-		}
-		if ctx.Err() != nil {
-			_ = rwc.Close()
-			return
-		}
-		stop := context.AfterFunc(ctx, func() { _ = rwc.Close() })
 		defer stop()
-		_ = conn.Disconnect()
+		var uerr, derr error
+		if sub != nil && ctx.Err() == nil {
+			uerr = unsubscribe(sub)
+		}
+		if ctx.Err() == nil {
+			derr = conn.Disconnect()
+		}
+		gotStep = errors.Join(uerr, derr)
+		// A step the close cut short reads as finished, so a done ctx is
+		// reported whichever of done and ctx.Done the caller sees first.
+		gotCtx = ctx.Err()
 	}()
 	select {
 	case <-done:
-		return nil
 	case <-ctx.Done():
 		select {
 		case <-done:
-			return nil
 		default:
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
+	return gotStep, gotCtx
 }
 
 // unsubscribe calls sub.Unsubscribe and reports a runtime panic from it as an
@@ -156,9 +172,12 @@ func unsubscribe(sub transport.Subscription) (err error) {
 }
 
 // fetchToken performs the credential leg and returns the raw token string.
-// The credential connection is always ended, per endCredentialConn; if ctx is
-// done before that finishes, fetchToken returns an error naming the credential
-// connection even when a token arrived.
+// The credential connection is always ended, per endCredentialConn. If ctx is
+// done before that finishes, fetchToken returns an error naming the
+// credential connection and wrapping ctx.Err() and any step error, even when
+// a token arrived. Any other teardown failure goes to logger only: the
+// session it would release is gone or going either way, and the token is
+// still valid.
 func fetchToken(
 	ctx context.Context,
 	netDial NetDialer,
@@ -166,6 +185,7 @@ func fetchToken(
 	user, pass string,
 	heartBeat time.Duration,
 	heartBeats *transport.HeartBeatIntervals,
+	logger *slog.Logger,
 ) (token string, err error) {
 	// Dial and STOMP-connect with real credentials.
 	rwc1, err := netDial(ctx)
@@ -185,8 +205,17 @@ func fetchToken(
 	}
 	var sub transport.Subscription
 	defer func() {
-		if terr := endCredentialConn(ctx, rwc1, conn1, sub); terr != nil && err == nil {
-			token, err = "", fmt.Errorf("credential connection teardown: %w", terr)
+		stepErr, ctxErr := endCredentialConn(ctx, rwc1, conn1, sub)
+		switch {
+		case ctxErr != nil && err == nil:
+			if stepErr != nil {
+				ctxErr = fmt.Errorf("%w: %w", ctxErr, stepErr)
+			}
+			token, err = "", fmt.Errorf("credential connection teardown: %w", ctxErr)
+		case ctxErr == nil && stepErr != nil:
+			logger.LogAttrs(ctx, slog.LevelWarn, "gridappsd auth: credential connection teardown failed",
+				slog.Bool("token_received", err == nil),
+				slog.Any("error", stepErr))
 		}
 	}()
 

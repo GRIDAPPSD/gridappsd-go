@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"time"
 
@@ -122,6 +123,12 @@ type Config struct {
 	// broker that answers with a non-zero send interval therefore still arms
 	// the timer. See the characterization tests in internal/stomp.
 	HeartBeats *transport.HeartBeatIntervals
+
+	// Logger receives failures that Connect reports without failing, such as
+	// a credential connection teardown that fails after the token arrived,
+	// logged at slog.LevelWarn with the cause under the "error" key. Nil
+	// uses slog.Default(); slog.New(slog.DiscardHandler) silences it.
+	Logger *slog.Logger
 }
 
 // Connect dials the GridAPPS-D broker (plain TCP or TLS, per cfg.TLSConfig
@@ -145,7 +152,7 @@ func Connect(ctx context.Context, cfg Config) (transport.Conn, error) {
 		return dial(ctx, cfg.Address, cfg.TLSConfig, cfg.AllowPlaintext)
 	}
 
-	conn, err := auth.Exchange(ctx, netDial, &istormp.Dialer{}, cfg.User, cfg.Password, cfg.HeartBeat, cfg.HeartBeats)
+	conn, err := auth.Exchange(ctx, netDial, &istormp.Dialer{}, cfg.User, cfg.Password, cfg.HeartBeat, cfg.HeartBeats, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("gridappsd connect to %s: %w", cfg.Address, err)
 	}
