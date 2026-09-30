@@ -50,22 +50,40 @@ func withHandshakeTimeout(t *testing.T, d time.Duration) {
 // TestDialTLS_DefaultBoundsHandshake is acceptance criterion 1 and 5: a
 // context with no deadline must not wait forever against a peer that
 // accepts TCP and never completes a TLS handshake.
+//
+// The call runs in a goroutine behind a select with its own bound, rather
+// than being awaited directly: a mutant that removes the bound-selection
+// branch in dial makes dialTLS block forever here, and without the select
+// that would surface only as go test's own per-binary timeout (10 minutes
+// by default) instead of a failing assertion.
 func TestDialTLS_DefaultBoundsHandshake(t *testing.T) {
 	withHandshakeTimeout(t, 100*time.Millisecond)
 	ln := hangingListener(t)
 
+	type dialOutcome struct {
+		err     error
+		elapsed time.Duration
+	}
+	outcome := make(chan dialOutcome, 1)
 	start := time.Now()
-	_, err := dialTLS(context.Background(), ln.Addr().String(), &tls.Config{})
-	elapsed := time.Since(start)
+	go func() {
+		_, err := dialTLS(context.Background(), ln.Addr().String(), &tls.Config{})
+		outcome <- dialOutcome{err: err, elapsed: time.Since(start)}
+	}()
 
-	if err == nil {
-		t.Fatal("expected an error from a handshake that never completes, got nil")
-	}
-	if elapsed > time.Second {
-		t.Fatalf("dialTLS with no caller deadline took %s, want bounded by the default (100ms)", elapsed)
-	}
-	if !errors.Is(err, ErrHandshakeTimeout) {
-		t.Fatalf("expected errors.Is(err, ErrHandshakeTimeout), got %v", err)
+	select {
+	case res := <-outcome:
+		if res.err == nil {
+			t.Fatal("expected an error from a handshake that never completes, got nil")
+		}
+		if res.elapsed > time.Second {
+			t.Fatalf("dialTLS with no caller deadline took %s, want bounded by the default (100ms)", res.elapsed)
+		}
+		if !errors.Is(res.err, ErrHandshakeTimeout) {
+			t.Fatalf("expected errors.Is(err, ErrHandshakeTimeout), got %v", res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dialTLS with no caller deadline did not return within 2s: the default handshake bound appears not to be applied")
 	}
 }
 
