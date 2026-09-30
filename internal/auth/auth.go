@@ -80,9 +80,29 @@ func Exchange(
 		HeartBeats: heartBeats,
 	})
 	if err != nil {
+		// go-stomp's Connect does not close rwc on a failed handshake.
+		_ = rwc2.Close()
 		return nil, fmt.Errorf("auth exchange second connect: %w", err)
 	}
 	return conn2, nil
+}
+
+// boundedTeardown runs teardown, a call that may block waiting on a broker
+// receipt with no context support of its own, and returns as soon as either
+// teardown completes or ctx is done, whichever comes first. When ctx wins the
+// race, teardown keeps running in the background; go-stomp bounds it with its
+// own receipt timeout, so the goroutine cannot leak past that, only outlive
+// the caller by up to it.
+func boundedTeardown(ctx context.Context, teardown func() error) {
+	done := make(chan struct{})
+	go func() {
+		_ = teardown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // fetchToken performs the credential leg and returns the raw token string.
@@ -107,12 +127,14 @@ func fetchToken(
 		HeartBeats: heartBeats,
 	})
 	if err != nil {
+		// go-stomp's Connect does not close rwc on a failed handshake.
+		_ = rwc1.Close()
 		return "", fmt.Errorf("credential connect: %w", err)
 	}
 	// Always disconnect the credential connection; goss.py leaks it, we do not.
-	// Error intentionally discarded: the credential leg is disposable once the
-	// token is received; Disconnect failure has no meaningful recovery path here.
-	defer func() { _ = conn1.Disconnect() }()
+	// Bounded by ctx: a broker that accepts the login and then goes silent
+	// would otherwise hold this past go-stomp's own receipt timeout.
+	defer boundedTeardown(ctx, conn1.Disconnect)
 
 	// Named temp reply destination. The subscribe uses the /queue/ prefix;
 	// the reply-to header on SEND uses the bare name (no prefix). GOSS routes
@@ -135,10 +157,8 @@ func fetchToken(
 	// Best-effort unsubscribe when fetchToken returns (success or error). On
 	// the success path the token has already been read and the subscription is
 	// spent; on the error path ctx is done or the subscription never delivered.
-	// Unsubscribe failure has no recovery path: the credential connection is
-	// disconnected by the sibling defer above, which terminates the underlying
-	// STOMP session regardless.
-	defer func() { _ = sub.Unsubscribe() }()
+	// Bounded by ctx for the same reason as the Disconnect above.
+	defer boundedTeardown(ctx, sub.Unsubscribe)
 
 	// The payload is base64(user + ":" + password), exactly as goss.py does:
 	//   base64Str = base64.b64encode(userAuthStr.encode())  where userAuthStr = f"{user}:{pass}"
