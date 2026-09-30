@@ -34,6 +34,9 @@ const (
 	// brokerFlood is brokerAnswering except that the token reply is followed
 	// by more messages on the reply queue than the client buffers hold.
 	brokerFlood
+	// brokerNoUnsubscribeReceipt is brokerAnswering except that UNSUBSCRIBE
+	// is never answered: the broker stalls after handing out the token.
+	brokerNoUnsubscribeReceipt
 )
 
 // floodExtra is how many messages brokerFlood sends after the token: more
@@ -166,7 +169,9 @@ func (b *stompBroker) serve(idx int, c net.Conn) {
 			}
 		}
 		receipt, ok := f.Header.Contains(frame.Receipt)
-		answer := b.mode != brokerSilent && !(b.mode == brokerNoDisconnectReceipt && f.Command == frame.DISCONNECT)
+		answer := b.mode != brokerSilent &&
+			!(b.mode == brokerNoDisconnectReceipt && f.Command == frame.DISCONNECT) &&
+			!(b.mode == brokerNoUnsubscribeReceipt && f.Command == frame.UNSUBSCRIBE)
 		if ok && answer {
 			out = append(out, frame.New(frame.RECEIPT, frame.ReceiptId, receipt))
 		}
@@ -301,6 +306,47 @@ func TestExchange_StalledDisconnectReceiptBoundedByContext(t *testing.T) {
 		t.Errorf("Exchange took %v, want at most %v", elapsed, ctxBudget+margin)
 	}
 	waitForGoroutines(t, before, 2*time.Second)
+}
+
+// TestExchange_StalledUnsubscribeReceiptBoundedByContext runs the real stack
+// against a broker that hands out the token and then never answers
+// UNSUBSCRIBE. The UNSUBSCRIBE is already pending when the caller's deadline
+// passes, and closing the transport then must end go-stomp's receipt wait and
+// release the sockets, rather than holding them for its 30 s receipt timeout.
+func TestExchange_StalledUnsubscribeReceiptBoundedByContext(t *testing.T) {
+	const (
+		ctxBudget = 300 * time.Millisecond
+		margin    = 400 * time.Millisecond
+		settle    = 2 * time.Second
+	)
+	b := startStompBroker(t, brokerNoUnsubscribeReceipt)
+	beforeG, beforeFD := runtime.NumGoroutine(), countOpenFDs(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), ctxBudget)
+	defer cancel()
+	start := time.Now()
+	_, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "credential connection teardown") {
+		t.Fatalf("Exchange error = %v, want credential connection teardown wrapping %v", err, context.DeadlineExceeded)
+	}
+	if got := b.commands(0); len(got) == 0 || got[len(got)-1] != frame.UNSUBSCRIBE {
+		t.Fatalf("credential leg frames = %v, want the last one UNSUBSCRIBE; the deadline did not find it pending", got)
+	}
+	if elapsed > ctxBudget+margin {
+		t.Errorf("Exchange took %v, want at most %v", elapsed, ctxBudget+margin)
+	}
+	deadline := time.Now().Add(settle)
+	for (runtime.NumGoroutine() > beforeG || countOpenFDs(t) > beforeFD) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := runtime.NumGoroutine(); got > beforeG {
+		t.Errorf("goroutine count %d, %v after Exchange returned, want at most %d", got, settle, beforeG)
+	}
+	if got := countOpenFDs(t); got > beforeFD {
+		t.Errorf("descriptor count %d, %v after Exchange returned, want at most %d", got, settle, beforeFD)
+	}
 }
 
 // TestExchange_FloodedReplyQueueDoesNotStallTeardown runs the real stack
