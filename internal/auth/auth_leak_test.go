@@ -29,27 +29,78 @@ func countOpenFDs(t *testing.T) int {
 	return len(entries)
 }
 
-// realFDListener returns a TCP listener that accepts and immediately closes
-// each connection, so this test's own accept loop does not itself accumulate
-// server-side descriptors and confound the count under measurement (the
-// dialed, client-side descriptor).
-func realFDListener(t *testing.T) net.Listener {
+// realFDListener returns a TCP listener that accepts and immediately resets
+// each connection, and a channel that receives once per connection after its
+// server-side descriptor is closed. Counting only after every accepted
+// connection is closed keeps this test's own descriptors out of the count
+// under measurement (the dialed, client-side descriptor).
+func realFDListener(t *testing.T, conns int) (net.Listener, <-chan struct{}) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Skipf("cannot open a TCP listener on this host: %v", err)
 	}
+	closed := make(chan struct{}, conns)
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			// Reset rather than close, so no socket lingers in TIME_WAIT and
+			// repeated runs do not exhaust the local port range.
+			if tc, ok := c.(*net.TCPConn); ok {
+				_ = tc.SetLinger(0)
+			}
 			_ = c.Close()
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
 		}
 	}()
-	return ln
+	return ln, closed
 }
+
+// assertNoFDLeak runs attempt fdLeakAttempts times, each expected to fail
+// after dialing the listener once through dialReal, and fails the test if the
+// process holds more descriptors afterwards than before.
+func assertNoFDLeak(t *testing.T, what string, attempt func(dialReal auth.NetDialer) error) {
+	t.Helper()
+	// Not parallel: disables the GC process-wide for its duration so a
+	// spontaneous collection cannot reclaim a leaked descriptor through the
+	// net.Conn finalizer and mask the defect under test.
+	old := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(old)
+
+	ln, closed := realFDListener(t, fdLeakAttempts)
+	defer ln.Close()
+	dialReal := func(ctx context.Context) (io.ReadWriteCloser, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", ln.Addr().String())
+	}
+
+	before := countOpenFDs(t)
+	for i := 0; i < fdLeakAttempts; i++ {
+		if err := attempt(dialReal); err == nil {
+			t.Fatalf("attempt %d: expected an error, got nil", i)
+		}
+	}
+	for i := 0; i < fdLeakAttempts; i++ {
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("listener closed %d of %d accepted connections", i, fdLeakAttempts)
+		}
+	}
+	after := countOpenFDs(t)
+
+	if got := after - before; got != 0 {
+		t.Errorf("descriptor count grew by %d across %d %s, want 0 (before=%d after=%d)", got, fdLeakAttempts, what, before, after)
+	}
+}
+
+const fdLeakAttempts = 40
 
 // failingDialer always fails the STOMP CONNECT handshake, mirroring a broker
 // that refuses the login. It never touches rwc: this models go-stomp's own
@@ -66,33 +117,11 @@ func (d *failingDialer) Dial(_ context.Context, _ io.ReadWriteCloser, _ transpor
 // TestFetchToken_ClosesCredentialConnOnDialError proves the credential leg's
 // dialed socket does not leak when the STOMP CONNECT handshake fails.
 func TestFetchToken_ClosesCredentialConnOnDialError(t *testing.T) {
-	// Not t.Parallel: disables the GC process-wide for its duration so a
-	// spontaneous collection cannot reclaim a leaked descriptor through the
-	// net.Conn finalizer and mask the defect under test.
-	old := debug.SetGCPercent(-1)
-	defer debug.SetGCPercent(old)
-
-	ln := realFDListener(t)
-	defer ln.Close()
-
-	netDial := func(ctx context.Context) (io.ReadWriteCloser, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, "tcp", ln.Addr().String())
-	}
 	dialer := &failingDialer{err: errors.New("stomp connect: login refused")}
-
-	const attempts = 40
-	before := countOpenFDs(t)
-	for i := 0; i < attempts; i++ {
-		if _, err := auth.Exchange(context.Background(), netDial, dialer, "u", "p", time.Second, nil); err == nil {
-			t.Fatalf("attempt %d: expected error from a failing dialer, got nil", i)
-		}
-	}
-	after := countOpenFDs(t)
-
-	if got := after - before; got != 0 {
-		t.Errorf("descriptor count grew by %d across %d refused logins, want 0 (before=%d after=%d)", got, attempts, before, after)
-	}
+	assertNoFDLeak(t, "refused logins", func(dialReal auth.NetDialer) error {
+		_, err := auth.Exchange(context.Background(), dialReal, dialer, "u", "p", time.Second, nil)
+		return err
+	})
 }
 
 // twoCallDialer succeeds on the first Dial call and fails on the second,
@@ -119,40 +148,24 @@ func (d *twoCallDialer) Dial(_ context.Context, _ io.ReadWriteCloser, _ transpor
 // dialed socket does not leak when its STOMP CONNECT handshake fails, even
 // though the credential leg ahead of it succeeded.
 func TestExchange_ClosesSecondConnOnDialError(t *testing.T) {
-	old := debug.SetGCPercent(-1)
-	defer debug.SetGCPercent(old)
-
-	ln := realFDListener(t)
-	defer ln.Close()
-
 	// The credential leg is fully mocked (no real socket): its own
 	// close-on-error path is covered by TestFetchToken_ClosesCredentialConnOnDialError,
 	// and giving it a real fd here would fold an unrelated fake's cleanup
 	// behavior into the count this test asserts on. Only the durable leg,
 	// the one under test, dials a real, fd-backed connection.
-	callN := 0
-	netDial := func(ctx context.Context) (io.ReadWriteCloser, error) {
-		callN++
-		if callN%2 == 1 {
-			return nopRWC{}, nil
+	assertNoFDLeak(t, "refused second-leg logins", func(dialReal auth.NetDialer) error {
+		callN := 0
+		netDial := func(ctx context.Context) (io.ReadWriteCloser, error) {
+			callN++
+			if callN == 1 {
+				return nopRWC{}, nil
+			}
+			return dialReal(ctx)
 		}
-		var d net.Dialer
-		return d.DialContext(ctx, "tcp", ln.Addr().String())
-	}
-
-	const attempts = 40
-	before := countOpenFDs(t)
-	for i := 0; i < attempts; i++ {
 		dialer := &twoCallDialer{first: newFakeConn(fakeToken), secondErr: errors.New("stomp connect: login refused")}
-		if _, err := auth.Exchange(context.Background(), netDial, dialer, "u", "p", time.Second, nil); err == nil {
-			t.Fatalf("attempt %d: expected error from a failing second dial, got nil", i)
-		}
-	}
-	after := countOpenFDs(t)
-
-	if got := after - before; got != 0 {
-		t.Errorf("descriptor count grew by %d across %d refused second-leg logins, want 0 (before=%d after=%d)", got, attempts, before, after)
-	}
+		_, err := auth.Exchange(context.Background(), netDial, dialer, "u", "p", time.Second, nil)
+		return err
+	})
 }
 
 // slowFakeSub wraps fakeSub so Unsubscribe blocks for a configured delay,
