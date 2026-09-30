@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -190,8 +191,8 @@ func (c *slowFakeConn) Subscribe(ctx context.Context, dest string) (transport.Su
 // TestFetchToken_TeardownBoundedByContext proves that a credential connection
 // whose Disconnect and Unsubscribe each hang, as a silent broker's unanswered
 // receipt does, cannot hold Exchange open past the caller's context deadline
-// by more than a small margin. Without the bound, the two LIFO-ordered
-// deferred calls run one after the other and together take roughly 2*delay.
+// by more than a small margin. Without the bound, Unsubscribe and Disconnect
+// run one after the other and together take roughly 2*delay.
 func TestFetchToken_TeardownBoundedByContext(t *testing.T) {
 	const (
 		teardownDelay = 3 * time.Second
@@ -212,8 +213,10 @@ func TestFetchToken_TeardownBoundedByContext(t *testing.T) {
 	_, err := auth.Exchange(ctx, netDialStub, dialer, "u", "p", 10*time.Second, nil)
 	elapsed := time.Since(start)
 
-	if err != nil {
-		t.Fatalf("Exchange returned error: %v", err)
+	// The token arrived, but the credential connection was still being torn
+	// down when ctx ran out, so that is what the error names.
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "credential connection teardown") {
+		t.Fatalf("Exchange error = %v, want credential connection teardown wrapping %v", err, context.DeadlineExceeded)
 	}
 	if elapsed > ctxBudget+margin {
 		t.Errorf("Exchange took %v, want at most %v (ctx budget %v + %v margin); teardown is not bounded by ctx", elapsed, ctxBudget+margin, ctxBudget, margin)
@@ -234,14 +237,14 @@ func TestFetchToken_TeardownGoroutineExits(t *testing.T) {
 	dialer := newFakeDialer(conn1, conn2)
 
 	// A ctx that expires well before teardownDelay: Exchange returns once
-	// ctx.Done() fires, but the underlying Disconnect/Unsubscribe goroutines
-	// are still running in the background at that point.
+	// ctx.Done() fires, but the teardown goroutine is still waiting on the
+	// slow Unsubscribe at that point.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
 	before := runtime.NumGoroutine()
-	if _, err := auth.Exchange(ctx, netDialStub, dialer, "u", "p", 10*time.Second, nil); err != nil {
-		t.Fatalf("Exchange returned error: %v", err)
+	if _, err := auth.Exchange(ctx, netDialStub, dialer, "u", "p", 10*time.Second, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Exchange error = %v, want it to wrap %v", err, context.DeadlineExceeded)
 	}
 
 	deadline := time.Now().Add(2 * teardownDelay)
@@ -254,5 +257,40 @@ func TestFetchToken_TeardownGoroutineExits(t *testing.T) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// panickingSub is a fakeSub whose Unsubscribe fails the way go-stomp's does
+// when its receipt wait times out after the channel was closed.
+type panickingSub struct{ *fakeSub }
+
+func (s *panickingSub) Unsubscribe() error {
+	s.fakeSub.closeC()
+	s.fakeSub.ch <- transport.Msg{} // send on closed channel
+	return nil
+}
+
+type panickingSubConn struct{ *fakeConn }
+
+func (c *panickingSubConn) Subscribe(ctx context.Context, dest string) (transport.Subscription, error) {
+	sub, err := c.fakeConn.Subscribe(ctx, dest)
+	if err != nil {
+		return nil, err
+	}
+	return &panickingSub{fakeSub: sub.(*fakeSub)}, nil
+}
+
+// TestFetchToken_UnsubscribePanicDoesNotEscape proves a runtime panic inside
+// Unsubscribe is contained to the teardown, which still disconnects the
+// credential connection, instead of crashing the process.
+func TestFetchToken_UnsubscribePanicDoesNotEscape(t *testing.T) {
+	conn1 := &panickingSubConn{fakeConn: newFakeConn(fakeToken)}
+	dialer := newFakeDialer(conn1, newFakeConn(""))
+
+	if _, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second, nil); err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	if !conn1.disconnected {
+		t.Error("credential connection was not disconnected after Unsubscribe panicked")
 	}
 }
