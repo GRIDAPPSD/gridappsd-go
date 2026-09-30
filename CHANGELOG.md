@@ -28,10 +28,11 @@ tags.
   connection, including a runtime panic recovered from go-stomp, is no
   longer discarded: it is logged at warning level through `Config.Logger`,
   under the `error` key, with `token_received` saying whether the token
-  arrived, and a token that arrived is still used. A context that ends while that teardown is still running
-  fails the exchange with a credential connection teardown error that wraps
-  the context error; before, the exchange could instead fail at the second
-  dial with a timeout error that did not wrap the context error (#25).
+  arrived, and a token that arrived is still used. A context that ends while
+  that teardown is still running fails the exchange with a credential
+  connection teardown error that wraps the context error; before, the
+  exchange could instead fail at the second dial with a timeout error that
+  did not wrap the context error (#25).
 
 ## [0.2.1] - 2026-09-30
 
