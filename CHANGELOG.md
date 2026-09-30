@@ -8,6 +8,8 @@ tags.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-30
+
 ### Fixed
 
 - An `Unsubscribe` can no longer outlive its connection and panic the
@@ -126,6 +128,7 @@ Seeded from `.github/release-notes/v0.1.0.md`.
 - A third defect was in `go-stomp` itself and is third-party; not tracked in
   this repository. Still present; see [0.2.0] "Known issues".
 
-[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.0...main
+[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.1...main
+[0.2.1]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/GRIDAPPSD/gridappsd-go/releases/tag/v0.1.0
