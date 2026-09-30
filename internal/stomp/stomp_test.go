@@ -20,10 +20,14 @@ import (
 // unsubNotify, when non-nil, receives an empty struct on each Unsubscribe call,
 // giving tests a deterministic signal that the bridge has reached the unsubscribe
 // path. It is nil in tests that do not need it.
+//
+// Unsubscribe closes ch, as go-stomp closes its channel once the unsubscribe
+// receipt arrives.
 type fakeStompSub struct {
 	ch          chan *gostomp.Message
 	unsubCalled atomic.Bool
 	unsubNotify chan struct{} // optional; nil if unused
+	closeOnce   sync.Once
 }
 
 func (f *fakeStompSub) Unsubscribe(opts ...func(*frame.Frame) error) error {
@@ -31,18 +35,27 @@ func (f *fakeStompSub) Unsubscribe(opts ...func(*frame.Frame) error) error {
 	if f.unsubNotify != nil {
 		f.unsubNotify <- struct{}{}
 	}
+	f.closeOnce.Do(func() { close(f.ch) })
 	return nil
 }
 
 // newBridgeSub wires a sub to a fakeStompSub and starts the bridge goroutine.
 func newBridgeSub(ctx context.Context, f *fakeStompSub, outBuf int) *sub {
-	s := &sub{
-		gossub: f,
-		src:    f.ch,
-		ch:     make(chan transport.Msg, outBuf),
-	}
+	s := newUnstartedSub(f, f.ch, outBuf)
 	go s.bridge(ctx)
 	return s
+}
+
+// newUnstartedSub builds a sub gated by a connection that has not
+// disconnected, without starting its bridge.
+func newUnstartedSub(gs goStompSub, src chan *gostomp.Message, outBuf int) *sub {
+	return &sub{
+		gate:   &conn{},
+		gossub: gs,
+		src:    src,
+		ch:     make(chan transport.Msg, outBuf),
+		stop:   make(chan struct{}),
+	}
 }
 
 // TestBridge_ForwardsMessages verifies that normal messages are forwarded with
@@ -111,12 +124,8 @@ func TestBridge_CtxCancelExitsGoroutine(t *testing.T) {
 
 	// Deliberately unbuffered output channel: the bridge blocks immediately on
 	// the first outbound send because nobody is reading from s.ch.
-	s := &sub{
-		gossub:       f,
-		src:          f.ch,
-		ch:           make(chan transport.Msg, 0),
-		readyForSend: ready,
-	}
+	s := newUnstartedSub(f, f.ch, 0)
+	s.readyForSend = ready
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -189,15 +198,17 @@ func TestBridge_CtxCancelCallsUnsubscribe(t *testing.T) {
 }
 
 // TestBridge_ErrorMessageForwarded verifies that error messages are forwarded
-// and that the bridge exits after delivery (error messages are terminal).
+// and that the output channel closes after delivery (error messages are
+// terminal).
 func TestBridge_ErrorMessageForwarded(t *testing.T) {
 	t.Parallel()
 	f := &fakeStompSub{ch: make(chan *gostomp.Message, 1)}
+	defer close(f.ch)
 	s := newBridgeSub(context.Background(), f, subChanBuf)
 
 	brokerErr := errors.New("broker error")
 	f.ch <- &gostomp.Message{Err: brokerErr}
-	// Do not close f.ch; bridge must exit on its own after the error.
+	// Do not close f.ch yet; s.ch must close on its own after the error.
 
 	m, ok := <-s.ch
 	if !ok {
@@ -206,7 +217,7 @@ func TestBridge_ErrorMessageForwarded(t *testing.T) {
 	if m.Err == nil || m.Err.Error() != brokerErr.Error() {
 		t.Errorf("error mismatch: want %q, got %v", brokerErr.Error(), m.Err)
 	}
-	// After an error message the bridge exits and closes s.ch.
+	// After an error message the bridge closes s.ch.
 	_, ok = <-s.ch
 	if ok {
 		t.Error("expected output channel to close after error message, but it remained open")
@@ -383,11 +394,8 @@ func TestConn_Send(t *testing.T) {
 
 // TestConn_Subscribe verifies that Subscribe returns a working Subscription
 // and that the bridge forwards the message delivered by the fake server.
-// Teardown uses Disconnect only: calling cancel() concurrent with Disconnect
-// triggers a race in go-stomp v3 where Unsubscribe() sends on an already-closed
-// channel after the read loop finishes closeChannel. Let Disconnect close the
-// connection so the read loop closes gossub.C, and the bridge exits via the !ok
-// path without calling Unsubscribe() at all.
+// Teardown uses Disconnect only, so the read loop closes gossub.C and the
+// bridge exits via the !ok path without calling Unsubscribe() at all.
 func TestConn_Subscribe(t *testing.T) {
 	t.Parallel()
 	d := &Dialer{}
@@ -431,7 +439,7 @@ func TestNewSub_AndCAccessor(t *testing.T) {
 	src := make(chan *gostomp.Message)
 	close(src) // bridge exits on !ok immediately
 
-	s := newSub(context.Background(), &gostomp.Subscription{C: src})
+	s := newSub(context.Background(), &conn{}, &gostomp.Subscription{C: src})
 	if s.C() == nil {
 		t.Fatal("C() returned nil channel")
 	}
@@ -445,7 +453,7 @@ func TestNewSub_AndCAccessor(t *testing.T) {
 func TestSub_UnsubscribeDelegates(t *testing.T) {
 	t.Parallel()
 	f := &fakeStompSub{ch: make(chan *gostomp.Message)}
-	s := &sub{gossub: f, src: f.ch, ch: make(chan transport.Msg, subChanBuf)}
+	s := newUnstartedSub(f, f.ch, subChanBuf)
 
 	if err := s.Unsubscribe(); err != nil {
 		t.Errorf("Unsubscribe: %v", err)

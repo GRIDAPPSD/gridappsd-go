@@ -184,7 +184,9 @@ func (r *Router) Subscribe(ctx context.Context, dest string, h Handler) (Token, 
 	// silent failure GAG-009 describes. The dead subscription is not
 	// unsubscribed here: it ended peer-side, so its transport resources are
 	// already released and calling Unsubscribe on it races go-stomp's teardown.
-	sub, err := r.conn.Subscribe(ctx, dest)
+	// The go-stomp transport unsubscribes when its Subscribe ctx is done, so
+	// it gets a ctx that is never cancelled.
+	sub, err := r.conn.Subscribe(context.WithoutCancel(ctx), dest)
 	if err != nil {
 		return 0, fmt.Errorf("router: subscribe %q: %w", dest, err)
 	}

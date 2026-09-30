@@ -6,8 +6,11 @@ package stomp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"runtime"
+	"sync"
 	"time"
 
 	gostomp "github.com/go-stomp/stomp/v3"
@@ -95,9 +98,21 @@ func (d *Dialer) Dial(ctx context.Context, rwc io.ReadWriteCloser, cfg transport
 	return &conn{c: c}, nil
 }
 
+// errDisconnected reports an Unsubscribe that began after Disconnect. The
+// connection teardown ends the subscription instead.
+var errDisconnected = errors.New("stomp unsubscribe: connection disconnected")
+
 // conn wraps a *gostomp.Conn to satisfy transport.Conn.
+//
+// go-stomp v3.1.2 can panic the process when its connection closes under an
+// Unsubscribe (#23), so Disconnect refuses new unsubscribes and waits for
+// pending ones before it closes anything.
 type conn struct {
 	c *gostomp.Conn
+
+	mu      sync.Mutex
+	closing bool
+	unsubs  sync.WaitGroup
 }
 
 // The "reply-to" key in headers sets the reply-to header on the SEND frame;
@@ -116,6 +131,7 @@ func (c *conn) Send(_ context.Context, destination, contentType string, body []b
 }
 
 // Cancelling ctx triggers an Unsubscribe so the broker stops delivering messages.
+// Its result is what a later Unsubscribe call returns.
 func (c *conn) Subscribe(ctx context.Context, destination string) (transport.Subscription, error) {
 	// AckAuto: GOSS does not require explicit message acknowledgement.
 	// reply-to is deliberately NOT set on the SUBSCRIBE frame; go-stomp at
@@ -125,15 +141,41 @@ func (c *conn) Subscribe(ctx context.Context, destination string) (transport.Sub
 	if err != nil {
 		return nil, fmt.Errorf("stomp subscribe %q: %w", destination, err)
 	}
-	return newSub(ctx, gossub), nil
+	return newSub(ctx, c, gossub), nil
 }
 
 // Disconnect sends a STOMP DISCONNECT frame and closes the underlying connection.
+// Pending unsubscribes finish first; each is bounded by go-stomp's
+// unsubscribe receipt timeout.
 func (c *conn) Disconnect() error {
+	c.mu.Lock()
+	c.closing = true
+	c.mu.Unlock()
+	c.unsubs.Wait()
 	if err := c.c.Disconnect(); err != nil {
 		return fmt.Errorf("stomp disconnect: %w", err)
 	}
 	return nil
+}
+
+// beginUnsubscribe registers a pending unsubscribe, or reports false once
+// Disconnect has begun.
+func (c *conn) beginUnsubscribe() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closing {
+		return false
+	}
+	c.unsubs.Add(1)
+	return true
+}
+
+func (c *conn) endUnsubscribe() { c.unsubs.Done() }
+
+// unsubGate orders unsubscribes against the connection's Disconnect.
+type unsubGate interface {
+	beginUnsubscribe() bool
+	endUnsubscribe()
 }
 
 // goStompSub is the subset of *gostomp.Subscription used by the bridge.
@@ -143,24 +185,34 @@ type goStompSub interface {
 }
 
 // sub bridges a *gostomp.Subscription into transport.Subscription.
-// A goroutine forwards messages from the gostomp channel to s.ch.
+// A goroutine forwards messages from the gostomp channel to s.ch, and keeps
+// draining the gostomp channel until go-stomp closes it: go-stomp's read loop,
+// and with it every receipt on the connection, blocks while that channel is
+// full.
 //
 // readyForSend is a test-only hook: when non-nil, the bridge sends on it
 // immediately before attempting the outbound send to s.ch, giving the test
 // a deterministic signal that the goroutine has reached the blocking point.
 // It is nil in all production code paths.
 type sub struct {
+	gate         unsubGate
 	gossub       goStompSub
 	src          <-chan *gostomp.Message
 	ch           chan transport.Msg
+	stop         chan struct{} // closed when Unsubscribe begins
 	readyForSend chan struct{} // test hook; nil in production
+
+	once sync.Once
+	err  error
 }
 
-func newSub(ctx context.Context, gossub *gostomp.Subscription) *sub {
+func newSub(ctx context.Context, gate unsubGate, gossub *gostomp.Subscription) *sub {
 	s := &sub{
+		gate:   gate,
 		gossub: gossub,
 		src:    gossub.C,
 		ch:     make(chan transport.Msg, subChanBuf),
+		stop:   make(chan struct{}),
 	}
 	go s.bridge(ctx)
 	return s
@@ -168,21 +220,63 @@ func newSub(ctx context.Context, gossub *gostomp.Subscription) *sub {
 
 func (s *sub) C() <-chan transport.Msg { return s.ch }
 
+// Unsubscribe unsubscribes once; every call returns that attempt's result.
 func (s *sub) Unsubscribe() error {
-	return s.gossub.Unsubscribe()
+	s.once.Do(func() {
+		close(s.stop)
+		s.err = s.unsubscribe()
+	})
+	return s.err
 }
 
-// bridge runs in a goroutine, forwarding from gostomp.Subscription.C to s.ch.
-// Each outbound send is wrapped in a nested select so a full s.ch cannot trap
-// the goroutine when ctx is cancelled; the goroutine always has an exit path.
+func (s *sub) unsubscribe() (err error) {
+	if !s.gate.beginUnsubscribe() {
+		return errDisconnected
+	}
+	defer s.gate.endUnsubscribe()
+	// go-stomp's receipt-timeout path sends on a channel a concurrent close may
+	// have closed (#23). It runs on this goroutine, so it is recoverable here.
+	defer func() {
+		if r := recover(); r != nil {
+			re, ok := r.(runtime.Error)
+			if !ok {
+				panic(r)
+			}
+			err = fmt.Errorf("stomp unsubscribe: %w", re)
+		}
+	}()
+	if err := s.gossub.Unsubscribe(); err != nil {
+		return fmt.Errorf("stomp unsubscribe: %w", err)
+	}
+	return nil
+}
+
+// bridge forwards from gostomp.Subscription.C to s.ch until the subscription
+// ends, is unsubscribed, or ctx is done; it then closes s.ch and discards
+// whatever go-stomp still delivers until go-stomp closes its channel.
 func (s *sub) bridge(ctx context.Context) {
-	defer close(s.ch)
+	out, done, stop := s.ch, ctx.Done(), s.stop
+	endOut := func() {
+		if out != nil {
+			close(out)
+			out, done, stop = nil, nil, nil
+		}
+	}
+	defer endOut()
+	unsubscribeOnCtx := func() {
+		// The result is kept for later Unsubscribe calls; go-stomp's channel
+		// must be drained meanwhile, so it cannot run on this goroutine.
+		go func() { _ = s.Unsubscribe() }()
+		endOut()
+	}
 	for {
 		select {
 		case msg, ok := <-s.src:
 			if !ok {
-				// go-stomp closed its channel: subscription ended.
 				return
+			}
+			if out == nil {
+				continue
 			}
 			m := transport.Msg{Body: msg.Body}
 			if msg.Err != nil {
@@ -195,20 +289,20 @@ func (s *sub) bridge(ctx context.Context) {
 				s.readyForSend <- struct{}{}
 			}
 			select {
-			case s.ch <- m:
-			case <-ctx.Done():
-				// Best-effort unsubscribe; ignore error since context is already done.
-				_ = s.gossub.Unsubscribe()
-				return
+			case out <- m:
+				if msg.Err != nil {
+					// Error messages are terminal.
+					endOut()
+				}
+			case <-done:
+				unsubscribeOnCtx()
+			case <-stop:
+				endOut()
 			}
-			if msg.Err != nil {
-				// Error messages are terminal: exit after forwarding.
-				return
-			}
-		case <-ctx.Done():
-			// Best-effort unsubscribe; ignore error since context is already done.
-			_ = s.gossub.Unsubscribe()
-			return
+		case <-done:
+			unsubscribeOnCtx()
+		case <-stop:
+			endOut()
 		}
 	}
 }

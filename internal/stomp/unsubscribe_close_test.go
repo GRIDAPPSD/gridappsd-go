@@ -152,6 +152,21 @@ func waitGoroutines(t *testing.T, baseline int) {
 	}
 }
 
+// unsubscribeWithin fails the test, rather than hanging it, when Unsubscribe
+// does not return in time.
+func unsubscribeWithin(t *testing.T, s transport.Subscription) error {
+	t.Helper()
+	res := make(chan error, 1)
+	go func() { res <- s.Unsubscribe() }()
+	select {
+	case err := <-res:
+		return err
+	case <-time.After(3 * time.Second):
+		t.Fatal("Unsubscribe did not return")
+		return nil
+	}
+}
+
 func waitTime(t *testing.T, ch <-chan time.Time, what string) time.Time {
 	t.Helper()
 	select {
@@ -182,7 +197,7 @@ func TestSubscribe_CtxUnsubscribeWithUnreadMessages(t *testing.T) {
 	cancel()
 	waitTime(t, b.unsubAt, "UNSUBSCRIBE")
 
-	if err := s.Unsubscribe(); !errors.Is(err, &gostomp.ErrUnsubscribeReceiptTimeout) {
+	if err := unsubscribeWithin(t, s); !errors.Is(err, &gostomp.ErrUnsubscribeReceiptTimeout) {
 		t.Errorf("Unsubscribe: got %v, want the unsubscribe receipt timeout", err)
 	}
 	if err := c.Disconnect(); err != nil {
@@ -216,7 +231,7 @@ func TestDisconnect_WaitsForPendingUnsubscribe(t *testing.T) {
 	if gap := discAt.Sub(unsubAt); gap < unsubTimeout/2 {
 		t.Errorf("DISCONNECT arrived %v after UNSUBSCRIBE; want it held until the unsubscribe ended (%v)", gap, unsubTimeout)
 	}
-	if err := s.Unsubscribe(); !errors.Is(err, &gostomp.ErrUnsubscribeReceiptTimeout) {
+	if err := unsubscribeWithin(t, s); !errors.Is(err, &gostomp.ErrUnsubscribeReceiptTimeout) {
 		t.Errorf("Unsubscribe: got %v, want the unsubscribe receipt timeout", err)
 	}
 	for range s.C() {
@@ -237,7 +252,7 @@ func (p *panickingStompSub) Unsubscribe(...func(*frame.Frame) error) error {
 }
 
 func newTestSub(ctx context.Context, gs goStompSub, src chan *gostomp.Message) *sub {
-	s := &sub{gossub: gs, src: src, ch: make(chan transport.Msg, subChanBuf)}
+	s := newUnstartedSub(gs, src, subChanBuf)
 	go s.bridge(ctx)
 	return s
 }
@@ -262,5 +277,93 @@ func TestUnsubscribe_RecoversAndReportsPanic(t *testing.T) {
 	var re runtime.Error
 	if !errors.As(err, &re) {
 		t.Fatalf("Unsubscribe: got %v, want the recovered runtime error", err)
+	}
+}
+
+// TestUnsubscribe_AfterDisconnectDoesNotReachGoStomp pins the other ordering
+// rule: once Disconnect has begun, no UNSUBSCRIBE starts, because go-stomp's
+// closed-connection path closes the channel its read loop may be sending on.
+func TestUnsubscribe_AfterDisconnectDoesNotReachGoStomp(t *testing.T) {
+	t.Parallel()
+	f := &fakeStompSub{ch: make(chan *gostomp.Message)}
+	s := newTestSub(context.Background(), f, f.ch)
+	s.gate.(*conn).closing = true
+
+	if err := s.Unsubscribe(); !errors.Is(err, errDisconnected) {
+		t.Errorf("Unsubscribe: got %v, want %v", err, errDisconnected)
+	}
+	if f.unsubCalled.Load() {
+		t.Error("go-stomp Unsubscribe was called after Disconnect began")
+	}
+	if _, ok := <-s.C(); ok {
+		t.Error("C() delivered a message after Unsubscribe")
+	}
+	f.closeOnce.Do(func() { close(f.ch) })
+}
+
+// TestSubscription_LifecycleInterleavings drives every order of context
+// cancel, Unsubscribe and Disconnect over real go-stomp. None may panic,
+// Disconnect must succeed, and no goroutine may outlive the connection.
+//
+// Unread messages are queued only where an unsubscribe begins before
+// Disconnect: with none begun, an unread subscription stalls go-stomp's read
+// loop and its DISCONNECT receipt whatever this package does.
+func TestSubscription_LifecycleInterleavings(t *testing.T) {
+	type step int
+	const (
+		cancelCtx step = iota
+		unsubscribe
+		disconnect
+	)
+	timedOut := func(err error) bool { return errors.Is(err, &gostomp.ErrUnsubscribeReceiptTimeout) }
+	refused := func(err error) bool { return errors.Is(err, errDisconnected) }
+	either := func(err error) bool { return timedOut(err) || refused(err) }
+	unread := 3 * subChanBuf
+	cases := []struct {
+		name   string
+		steps  []step
+		queued int
+		want   func(error) bool
+	}{
+		{"cancel, unsubscribe, disconnect", []step{cancelCtx, unsubscribe, disconnect}, unread, timedOut},
+		{"unsubscribe, cancel, disconnect", []step{unsubscribe, cancelCtx, disconnect}, unread, timedOut},
+		{"unsubscribe, disconnect, cancel", []step{unsubscribe, disconnect, cancelCtx}, unread, timedOut},
+		// The context-triggered unsubscribe races Disconnect's refusal.
+		{"cancel, disconnect, unsubscribe", []step{cancelCtx, disconnect, unsubscribe}, 0, either},
+		{"disconnect, cancel, unsubscribe", []step{disconnect, cancelCtx, unsubscribe}, 0, refused},
+		{"disconnect, unsubscribe, cancel", []step{disconnect, unsubscribe, cancelCtx}, 0, refused},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			baseline := runtime.NumGoroutine()
+			b := startTCPBroker(t, tc.queued)
+			c := dialTCPBroker(t, b, 50*time.Millisecond)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			s, err := c.Subscribe(ctx, "/queue/interleave")
+			if err != nil {
+				t.Fatalf("Subscribe: %v", err)
+			}
+			var unsubErr error
+			for _, st := range tc.steps {
+				switch st {
+				case cancelCtx:
+					cancel()
+				case unsubscribe:
+					unsubErr = unsubscribeWithin(t, s)
+				case disconnect:
+					if err := c.Disconnect(); err != nil {
+						t.Errorf("Disconnect: %v", err)
+					}
+				}
+			}
+			if !tc.want(unsubErr) {
+				t.Errorf("Unsubscribe: unexpected result %v", unsubErr)
+			}
+			for range s.C() {
+			}
+			b.close()
+			waitGoroutines(t, baseline)
+		})
 	}
 }
