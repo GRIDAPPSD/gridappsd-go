@@ -8,6 +8,8 @@ tags.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-30
+
 ### Added
 
 - `Config.Logger`, a `*slog.Logger` that receives failures `Connect`
@@ -24,12 +26,13 @@ tags.
   after the call returns. go-stomp can still keep a goroutine past that
   close (#24). An `Unsubscribe` or `Disconnect` error on the credential
   connection, including a runtime panic recovered from go-stomp, is no
-  longer discarded: once the token has arrived it is logged at warning
-  level through `Config.Logger`, under the `error` key, and the token is
-  still used. A context that ends while that teardown is still running
-  fails the exchange with a credential connection teardown error that wraps
-  the context error; before, the exchange could instead fail at the second
-  dial with a timeout error that did not wrap the context error (#25).
+  longer discarded: it is logged at warning level through `Config.Logger`,
+  under the `error` key, with `token_received` saying whether the token
+  arrived, and a token that arrived is still used. A context that ends while
+  that teardown is still running fails the exchange with a credential
+  connection teardown error that wraps the context error; before, the
+  exchange could instead fail at the second dial with a timeout error that
+  did not wrap the context error (#25).
 
 ## [0.2.1] - 2026-09-30
 
@@ -151,7 +154,8 @@ Seeded from `.github/release-notes/v0.1.0.md`.
 - A third defect was in `go-stomp` itself and is third-party; not tracked in
   this repository. Still present; see [0.2.0] "Known issues".
 
-[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.1...main
+[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.0...main
+[0.3.0]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/GRIDAPPSD/gridappsd-go/releases/tag/v0.1.0
