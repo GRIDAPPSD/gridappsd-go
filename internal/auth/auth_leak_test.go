@@ -295,15 +295,60 @@ func (c *panickingSubConn) Subscribe(ctx context.Context, dest string) (transpor
 
 // TestFetchToken_UnsubscribePanicDoesNotEscape proves a runtime panic inside
 // Unsubscribe is contained to the teardown, which still disconnects the
-// credential connection, instead of crashing the process.
+// credential connection and reports the panic, instead of crashing the process.
 func TestFetchToken_UnsubscribePanicDoesNotEscape(t *testing.T) {
 	conn1 := &panickingSubConn{fakeConn: newFakeConn(fakeToken)}
 	dialer := newFakeDialer(conn1, newFakeConn(""))
 
-	if _, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second, nil); err != nil {
-		t.Fatalf("Exchange: %v", err)
+	conn, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second, nil)
+	var re runtime.Error
+	if !errors.As(err, &re) || !strings.Contains(err.Error(), "credential connection teardown") {
+		t.Fatalf("Exchange error = %v, want credential connection teardown wrapping the recovered runtime.Error", err)
+	}
+	if conn != nil {
+		t.Errorf("Exchange returned a connection alongside error %v", err)
 	}
 	if !conn1.disconnected {
 		t.Error("credential connection was not disconnected after Unsubscribe panicked")
+	}
+}
+
+var errUnsubscribeFailed = errors.New("unsubscribe receipt timeout")
+
+// failingSub is a fakeSub whose Unsubscribe ends the subscription and then
+// reports an error, as go-stomp's does after its receipt wait times out.
+type failingSub struct{ *fakeSub }
+
+func (s *failingSub) Unsubscribe() error {
+	s.fakeSub.closeC()
+	return errUnsubscribeFailed
+}
+
+type failingSubConn struct{ *fakeConn }
+
+func (c *failingSubConn) Subscribe(ctx context.Context, dest string) (transport.Subscription, error) {
+	sub, err := c.fakeConn.Subscribe(ctx, dest)
+	if err != nil {
+		return nil, err
+	}
+	return &failingSub{fakeSub: sub.(*fakeSub)}, nil
+}
+
+// TestFetchToken_UnsubscribeErrorReported proves an Unsubscribe error on the
+// credential connection is returned from Exchange rather than discarded, and
+// that the connection is still disconnected.
+func TestFetchToken_UnsubscribeErrorReported(t *testing.T) {
+	conn1 := &failingSubConn{fakeConn: newFakeConn(fakeToken)}
+	dialer := newFakeDialer(conn1, newFakeConn(""))
+
+	_, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second, nil)
+	if !errors.Is(err, errUnsubscribeFailed) || !strings.Contains(err.Error(), "credential connection teardown") {
+		t.Fatalf("Exchange error = %v, want credential connection teardown wrapping %v", err, errUnsubscribeFailed)
+	}
+	if !conn1.disconnected {
+		t.Error("credential connection was not disconnected after Unsubscribe failed")
+	}
+	if len(dialer.calls) != 1 {
+		t.Errorf("dialer called %d times, want 1: the durable leg must not be dialed after a failed teardown", len(dialer.calls))
 	}
 }
