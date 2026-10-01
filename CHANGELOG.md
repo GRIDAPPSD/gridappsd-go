@@ -16,9 +16,13 @@ tags.
 - `query.ModelInfo` (#43): requests each model's name and mRID and returns
   them exactly as stored, with the same refusals as `ModelNames` plus an
   entry that lacks a name or an mRID.
+- `query.SPARQL` (#43): sends SPARQL text to the model store and returns the
+  reply bytes unchanged, refusing an empty query and the same bad replies as
+  the other requests.
 - The repository now ships a command, `cmd/gridappsd-model` (#43), with a
-  `names` subcommand that writes the model name list to a file, and an `info`
-  subcommand that prints each model's name and mRID.
+  `names` subcommand that writes the model name list to a file, an `info`
+  subcommand that prints each model's name and mRID, and a `query` subcommand
+  that writes the reply to a SPARQL query to a file.
   Credentials come from environment variables only.
 
 ## [0.3.2] - 2026-09-30
