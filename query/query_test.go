@@ -111,3 +111,89 @@ func TestModelNamesWrapsTransportError(t *testing.T) {
 		t.Errorf("err = %v, want it to wrap %v", err, cause)
 	}
 }
+
+func TestModelInfoRequest(t *testing.T) {
+	t.Parallel()
+	bus := transporttest.NewReplyBus([]byte(`{"data":{"models":[{"modelName":"feeder-a","modelId":"AAAA-0001"}]}}`))
+	if _, err := query.ModelInfo(ctx(t), bus); err != nil {
+		t.Fatalf("ModelInfo: %v", err)
+	}
+	sent, err := bus.Conn.LastSend()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.Destination != wantDestination {
+		t.Errorf("destination = %q, want %q", sent.Destination, wantDestination)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(sent.Body, &got); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	want := map[string]any{"requestType": "QUERY_MODEL_INFO"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("body = %v, want exactly %v", got, want)
+	}
+}
+
+func TestModelInfoIsByteExact(t *testing.T) {
+	t.Parallel()
+	want := []query.Model{
+		{Name: "Test-Feeder-B", MRID: "ABCDEF12-0000-4000-8000-0000000000AB"},
+		{Name: "test-feeder-a", MRID: "FEDCBA98-0000-4000-8000-0000000000CD"},
+	}
+	const obj = `{"models":[{"modelName":"Test-Feeder-B","modelId":"ABCDEF12-0000-4000-8000-0000000000AB","regionName":"r"},` +
+		`{"modelName":"test-feeder-a","modelId":"FEDCBA98-0000-4000-8000-0000000000CD"}]}`
+	strData, _ := json.Marshal(obj)
+	for name, reply := range map[string]string{
+		"data as object": `{"data":` + obj + `}`,
+		"data as string": `{"data":` + string(strData) + `}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, err := query.ModelInfo(ctx(t), transporttest.NewReplyBus([]byte(reply)))
+			if err != nil {
+				t.Fatalf("ModelInfo: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("models = %+v, want %+v (upper-case mRID and mixed-case name exactly as sent)", got, want)
+			}
+		})
+	}
+}
+
+func TestModelInfoRefusesBadReplies(t *testing.T) {
+	t.Parallel()
+	for name, reply := range map[string]string{
+		"error member":       `{"error":"boom"}`,
+		"not JSON":           `nope`,
+		"no data":            `{}`,
+		"no models":          `{"data":{"modelNames":["x"]}}`,
+		"empty list":         `{"data":{"models":[]}}`,
+		"missing modelId":    `{"data":{"models":[{"modelName":"a"}]}}`,
+		"missing modelName":  `{"data":{"models":[{"modelId":"A"}]}}`,
+		"empty modelId":      `{"data":{"models":[{"modelName":"a","modelId":""}]}}`,
+		"empty modelName":    `{"data":{"models":[{"modelName":"","modelId":"A"}]}}`,
+		"non-string modelId": `{"data":{"models":[{"modelName":"a","modelId":7}]}}`,
+		"entry not object":   `{"data":{"models":["a"]}}`,
+		"marked incomplete":  `{"responseComplete":false,"data":{"models":[{"modelName":"a","modelId":"A"}]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			models, err := query.ModelInfo(ctx(t), transporttest.NewReplyBus([]byte(reply)))
+			if err == nil {
+				t.Fatalf("ModelInfo = %+v, nil error; want an error", models)
+			}
+			if models != nil {
+				t.Errorf("models = %+v alongside an error", models)
+			}
+		})
+	}
+}
+
+func TestModelInfoWrapsTransportError(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("no broker")
+	if _, err := query.ModelInfo(ctx(t), failingBus{cause}); !errors.Is(err, cause) {
+		t.Errorf("err = %v, want it to wrap %v", err, cause)
+	}
+}
