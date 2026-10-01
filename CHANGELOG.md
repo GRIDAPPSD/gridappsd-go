@@ -12,10 +12,6 @@ tags.
 
 ### Fixed
 
-- Unicode format characters in teardown error text are escaped (#39): the
-  bidirectional controls, zero-width characters and the byte order mark are
-  written as `\uNNNN` and the tag characters as `\UNNNNNNNN`, so broker text
-  can no longer reorder or hide part of a log line.
 - Escaping of teardown error text in the token exchange (#36):
   - a backslash in a teardown error is written as `\\`, so a literal `\x0a`
     from the broker no longer reads like an escaped line break;
@@ -25,6 +21,23 @@ tags.
     dangling `\x` before the truncation note;
   - `Error()` escapes only the text the bound keeps, so a very large broker
     message no longer costs several times its size in allocations.
+- Unicode format characters in teardown error text are escaped (#39): the
+  Arabic letter mark (U+061C), the left-to-right and right-to-left marks
+  (U+200E, U+200F), the zero-width characters (U+200B to U+200D), the
+  bidirectional embedding and override controls (U+202A to U+202E), the word
+  joiner (U+2060), the bidirectional isolate controls (U+2066 to U+2069) and
+  the byte order mark (U+FEFF) are written as `\uNNNN`, and the tag characters
+  (U+E0000 to U+E007F) as `\UNNNNNNNN`.
+
+### Known issues (not fixed in this release)
+
+- go-stomp can still keep a goroutine past the close of the credential
+  connection, since no public API on this module can close or drain the
+  underlying connection (#24).
+- Only the format characters listed in the #39 fix above are escaped. Other
+  Unicode format (Cf) characters, among them U+00AD, U+0600 to U+0605, U+180E,
+  U+2061 to U+2064, U+206A to U+206F and U+FFF9 to U+FFFB, are still written
+  as they arrive. They can hide or pad broker text in a log (#41).
 
 ## [0.3.1] - 2026-09-30
 
