@@ -179,32 +179,44 @@ type boundedError struct{ err error }
 
 func (e boundedError) Error() string {
 	raw := e.err.Error()
-	s := escapeControl(raw)
-	if len(s) <= maxStepErrLen {
+	s, truncated := escapeBounded(raw, maxStepErrLen)
+	if !truncated {
 		return s
 	}
-	cut := maxStepErrLen
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return fmt.Sprintf("%s... (truncated, %d bytes)", s[:cut], len(raw))
+	return fmt.Sprintf("%s... (truncated, %d bytes)", s, len(raw))
 }
 
-// escapeControl replaces each ASCII control byte of s, DEL included, with a
-// \xNN escape. Other bytes, multibyte runes among them, are kept.
-func escapeControl(s string) string {
-	if !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-		return s
-	}
+// escapeBounded writes s as printable text of at most limit bytes and reports
+// whether anything was left out. It stops before the first token that does not
+// fit, so an escape is never cut in half, and it reads only as much of s as the
+// limit keeps. The escapes keep the text from splitting a log line, reaching a
+// terminal as a control sequence, or reading like an escape the broker did not
+// send: backslash becomes \\; each ASCII control byte, DEL included, and each
+// byte of invalid UTF-8 becomes \xNN; each C1 control, U+2028 and U+2029
+// becomes \uNNNN. Other runes are kept.
+func escapeBounded(s string, limit int) (string, bool) {
 	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; c < 0x20 || c == 0x7f {
-			fmt.Fprintf(&b, "\\x%02x", c)
-			continue
+	b.Grow(min(len(s), limit))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		tok := s[i : i+size]
+		switch {
+		case r == utf8.RuneError && size == 1:
+			tok = fmt.Sprintf("\\x%02x", s[i])
+		case r == '\\':
+			tok = `\\`
+		case r < 0x20 || r == 0x7f:
+			tok = fmt.Sprintf("\\x%02x", r)
+		case r >= 0x80 && r <= 0x9f, r == 0x2028, r == 0x2029:
+			tok = fmt.Sprintf("\\u%04x", r)
 		}
-		b.WriteByte(s[i])
+		if b.Len()+len(tok) > limit {
+			return b.String(), true
+		}
+		b.WriteString(tok)
+		i += size
 	}
-	return b.String()
+	return b.String(), false
 }
 
 // bound wraps a non-nil err in a boundedError.

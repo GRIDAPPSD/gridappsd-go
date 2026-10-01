@@ -35,6 +35,16 @@ tags.
     cannot split a log line on ASCII control bytes; non-ASCII control bytes
     (C1, U+2028, U+2029) and invalid UTF-8 pass through unescaped.
 
+- Escaping of teardown error text in the token exchange (#36):
+  - a backslash in a teardown error is written as `\\`, so a literal `\x0a`
+    from the broker no longer reads like an escaped line break;
+  - C1 control characters, U+2028 and U+2029 are written as `\uNNNN`, and
+    each byte of invalid UTF-8 as `\xNN`;
+  - the 512-byte cut never lands inside an escape, where it could leave a
+    dangling `\x` before the truncation note;
+  - `Error()` escapes only the text the bound keeps, so a very large broker
+    message no longer costs several times its size in allocations.
+
 ## [0.3.0] - 2026-09-30
 
 ### Added
