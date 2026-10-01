@@ -8,6 +8,15 @@ tags.
 
 ## [Unreleased]
 
+### Added
+
+- `query.ModelNames` (#43): requests the model names on the model data
+  destination and returns them, refusing an error reply, a reply that is not
+  JSON, a reply with no data, and an empty list.
+- The repository now ships a command, `cmd/gridappsd-model` (#43), with a
+  `names` subcommand that writes the model name list to a file. Credentials
+  come from environment variables only.
+
 ## [0.3.2] - 2026-09-30
 
 ### Fixed
