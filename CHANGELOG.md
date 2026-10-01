@@ -14,15 +14,15 @@ tags.
 
 - Credential-connection teardown reporting in the token exchange (#31):
   - a teardown step failure after the exchange had already failed is
-    logged with `token_received=false` also when the context ends during
-    the teardown, where it was dropped before; the exchange still fails
-    with its own error;
+    logged with `token_received=false` only when a step error was produced
+    before the context ends; if the context ends first, nothing is logged;
+    the exchange still fails with its own error;
   - the credential connection is closed after a teardown step fails while
     the context is live, instead of being left to the transport;
   - the text a teardown error reports through `Error()` is cut to 512
-    bytes plus its full length, so a broker ERROR message of any size no
-    longer reaches a log that prints that text; a handler that unwraps the
-    error still reaches the full message;
+    bytes, and the full original length is reported, so a broker ERROR
+    message of any size no longer reaches a log that prints that text; a
+    handler that unwraps the error still reaches the full message;
   - an UNSUBSCRIBE and a DISCONNECT failure are joined with `; ` rather
     than a newline.
 
@@ -30,9 +30,10 @@ tags.
   - the 512-byte bound applies to each of the UNSUBSCRIBE and DISCONNECT
     errors before they are joined, so a long UNSUBSCRIBE message no longer
     hides the DISCONNECT error;
-  - ASCII control characters in a teardown error, line breaks and terminal
-    escapes among them, are written as `\xNN` escapes, so a broker message
-    cannot split a log line.
+  - ASCII control characters in a teardown error, including line breaks and
+    terminal escapes, are written as `\xNN` escapes, so a broker message
+    cannot split a log line on ASCII control bytes; non-ASCII control bytes
+    (C1, U+2028, U+2029) and invalid UTF-8 pass through unescaped.
 
 ## [0.3.0] - 2026-09-30
 
