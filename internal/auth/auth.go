@@ -160,7 +160,9 @@ func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, 
 
 // joinSteps joins the teardown step errors on one line, since the result is
 // logged and errors.Join would put a newline between them. Each step error is
-// bounded before the join so neither can hide the other.
+// bounded before the join so neither can hide the other. The "; " join and a
+// literal "(truncated, N bytes)" inside broker text are ambiguous with the
+// real separator and note.
 func joinSteps(uerr, derr error) error {
 	if uerr != nil && derr != nil {
 		return fmt.Errorf("%w; %w", uerr, derr)
@@ -192,8 +194,9 @@ func (e boundedError) Error() string {
 // limit keeps. The escapes keep the text from splitting a log line, reaching a
 // terminal as a control sequence, or reading like an escape the broker did not
 // send: backslash becomes \\; each ASCII control byte, DEL included, and each
-// byte of invalid UTF-8 becomes \xNN; each C1 control, U+2028 and U+2029
-// becomes \uNNNN. Other runes are kept.
+// byte of invalid UTF-8 becomes \xNN; each C1 control, U+2028, U+2029 and
+// format character (see isFormat) becomes \uNNNN, or \UNNNNNNNN for the tag
+// range. Other runes are kept.
 func escapeBounded(s string, limit int) (string, bool) {
 	var b strings.Builder
 	b.Grow(min(len(s), limit))
@@ -209,6 +212,12 @@ func escapeBounded(s string, limit int) (string, bool) {
 			tok = fmt.Sprintf("\\x%02x", r)
 		case r >= 0x80 && r <= 0x9f, r == 0x2028, r == 0x2029:
 			tok = fmt.Sprintf("\\u%04x", r)
+		case isFormat(r):
+			if r > 0xffff {
+				tok = fmt.Sprintf("\\U%08x", r)
+			} else {
+				tok = fmt.Sprintf("\\u%04x", r)
+			}
 		}
 		if b.Len()+len(tok) > limit {
 			return b.String(), true
@@ -217,6 +226,22 @@ func escapeBounded(s string, limit int) (string, bool) {
 		i += size
 	}
 	return b.String(), false
+}
+
+// isFormat reports the invisible format characters that reorder or hide text
+// in a log viewer: bidirectional controls, zero-width characters and tags.
+func isFormat(r rune) bool {
+	switch {
+	case r == 0x061c, r == 0x200e, r == 0x200f:
+	case r >= 0x200b && r <= 0x200d:
+	case r >= 0x202a && r <= 0x202e:
+	case r == 0x2060, r >= 0x2066 && r <= 0x2069:
+	case r == 0xfeff:
+	case r >= 0xe0000 && r <= 0xe007f:
+	default:
+		return false
+	}
+	return true
 }
 
 // bound wraps a non-nil err in a boundedError.
