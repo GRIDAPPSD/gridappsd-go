@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -936,5 +937,99 @@ func TestFetchToken_EscapedStepErrorReportsRawLength(t *testing.T) {
 	}
 	if len(logged) > 600 {
 		t.Errorf("logged text is %d bytes, want the escaped text capped near 512", len(logged))
+	}
+}
+
+// TestFetchToken_StepErrorEscapesEachControlByte proves every byte of the
+// control range and DEL is escaped when it is the only thing that needs
+// escaping, so neither the quick check nor the escaping loop can drop one.
+func TestFetchToken_StepErrorEscapesEachControlByte(t *testing.T) {
+	var bytes []byte
+	for c := 0; c <= 0x1f; c++ {
+		bytes = append(bytes, byte(c))
+	}
+	bytes = append(bytes, 0x7f)
+	for _, c := range bytes {
+		text := "a" + string([]byte{c}) + "b"
+		want := "a\\x" + string("0123456789abcdef"[c>>4]) + string("0123456789abcdef"[c&15]) + "b"
+		if got := loggedTeardownText(t, nil, errors.New(text)).Error(); got != want {
+			t.Errorf("control byte 0x%02x: logged %q, want %q", c, got, want)
+		}
+	}
+}
+
+// TestFetchToken_StepErrorCutKeepsEscapesWhole proves the bound never lands
+// inside an escape: a cut that would leave a partial one drops the whole
+// escape.
+func TestFetchToken_StepErrorCutKeepsEscapesWhole(t *testing.T) {
+	cases := []struct {
+		name, text, wantPrefix string
+	}{
+		{"hex escape straddles the bound", strings.Repeat("a", 510) + "\n" + "bbb", strings.Repeat("a", 510) + "..."},
+		{"hex escape ends at the bound", strings.Repeat("a", 508) + "\n" + "bbb", strings.Repeat("a", 508) + `\x0a...`},
+		{"unicode escape straddles the bound", strings.Repeat("a", 508) + "\u2028" + "bbb", strings.Repeat("a", 508) + "..."},
+		{"backslash escape straddles the bound", strings.Repeat("a", 511) + `\` + "bbb", strings.Repeat("a", 511) + "..."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logged := loggedTeardownText(t, nil, errors.New(tc.text)).Error()
+			if !strings.HasPrefix(logged, tc.wantPrefix) {
+				t.Errorf("logged tail %q, want text starting %q", logged[max(0, len(logged)-40):], tc.wantPrefix[max(0, len(tc.wantPrefix)-12):])
+			}
+			if !strings.HasSuffix(logged, "... (truncated, "+strconv.Itoa(len(tc.text))+" bytes)") {
+				t.Errorf("logged tail %q does not report the raw length %d", logged[max(0, len(logged)-40):], len(tc.text))
+			}
+			if strings.Count(logged, "...") != 1 {
+				t.Errorf("logged tail %q: text before the marker holds a dangling escape", logged[max(0, len(logged)-40):])
+			}
+		})
+	}
+}
+
+// TestFetchToken_StepErrorEscapesOtherLineBreakers proves C1 controls, the
+// Unicode line and paragraph separators, invalid UTF-8 and backslashes are
+// written as escapes, and that a literal escape from the broker differs from
+// one this package wrote.
+func TestFetchToken_StepErrorEscapesOtherLineBreakers(t *testing.T) {
+	cases := []struct{ name, text, want string }{
+		{"C1 NEL", "a\u0085b", `a\u0085b`},
+		{"C1 first", "a\u0080b", `a\u0080b`},
+		{"C1 last", "a\u009fb", `a\u009fb`},
+		{"first rune past C1 kept", "a\u00a0b", "a\u00a0b"},
+		{"line separator", "a\u2028b", `a\u2028b`},
+		{"paragraph separator", "a\u2029b", `a\u2029b`},
+		{"rune after separators kept", "a\u202ab", "a\u202ab"},
+		{"invalid lone continuation byte", "a\x80b", `a\x80b`},
+		{"invalid truncated rune", "a\xe2\x82b", `a\xe2\x82b`},
+		{"invalid byte 0xff", "a\xffb", `a\xffb`},
+		{"replacement character that was sent is kept", "a\ufffdb", "a\ufffdb"},
+		{"backslash", `a\b`, `a\\b`},
+		{"literal escape text from the broker", `a\x0ab`, `a\\x0ab`},
+		{"real newline", "a\nb", `a\x0ab`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := loggedTeardownText(t, nil, errors.New(tc.text)).Error(); got != tc.want {
+				t.Errorf("logged %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFetchToken_StepErrorEscapesOnlyWhatItKeeps proves Error() on a huge
+// message allocates for the bound rather than for the message.
+func TestFetchToken_StepErrorEscapesOnlyWhatItKeeps(t *testing.T) {
+	logged := loggedTeardownText(t, nil, errors.New(strings.Repeat("\n", 4<<20)))
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	text := logged.Error()
+	runtime.ReadMemStats(&after)
+
+	if got := after.TotalAlloc - before.TotalAlloc; got > 64<<10 {
+		t.Errorf("Error() allocated %d bytes for a %d byte message, want at most 64 KiB", got, 4<<20)
+	}
+	if !strings.HasSuffix(text, "... (truncated, 4194304 bytes)") {
+		t.Errorf("logged tail %q does not report the raw length", text[max(0, len(text)-40):])
 	}
 }
