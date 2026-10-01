@@ -15,8 +15,8 @@ ported; see Status below.
 The connection, messaging, and transport layers described below are
 implemented and covered by tests. Of the typed query API (the
 gridappsd-python `GridAPPSDClient` request helpers), only `query.ModelNames`
-is ported so far, and the `gridappsd-model` command ships with a `names`
-subcommand over it. The rest is not yet ported; see
+and `query.ModelInfo` are ported so far, and the `gridappsd-model` command
+ships with `names` and `info` subcommands over them. The rest is not yet ported; see
 [CHANGELOG.md](CHANGELOG.md) for what has shipped so far.
 
 ## Installation
@@ -193,7 +193,8 @@ answers would block forever; bound it as shown above.
   abstraction built on `gridappsd.Connect`.
 - `message`: STOMP frame header name constants used by the GOSS protocol.
 - `query`: typed requests on the model data destination. `ModelNames`
-  returns the names of the models the platform holds.
+  returns the names of the models the platform holds, and `ModelInfo` returns
+  each model's name and mRID exactly as stored.
 - `topics`: destination-naming helpers and well-known GridAPPS-D topic
   constants.
 - `transport`: the STOMP connection interfaces (`Conn`, `Subscription`,
@@ -213,7 +214,10 @@ go run github.com/GRIDAPPSD/gridappsd-go/cmd/gridappsd-model@latest names \
 naming the broker address, the request and the query time in UTC, then one
 lower-cased name per line, sorted and unique). When `--out` already exists
 its names are kept and the new ones added; a failed or empty reply writes
-nothing and exits non-zero. Credentials are read only from the environment
+nothing and exits non-zero.
+
+`info` prints one line per model, the name and the mRID separated by a tab,
+sorted by name, both exactly as the platform returned them. Credentials are read only from the environment
 variables named by `--user-env` and `--password-env` (default
 `GRIDAPPSD_USER` and `GRIDAPPSD_PASSWORD`); there is no credential flag.
 `--allow-plaintext` and `--ca-file` select the transport as in `Config`.

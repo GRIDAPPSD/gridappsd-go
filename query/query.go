@@ -117,3 +117,42 @@ func ModelNames(ctx context.Context, bus Requester) ([]string, error) {
 	}
 	return names, nil
 }
+
+const modelInfoBody = `{"requestType":"QUERY_MODEL_INFO"}`
+
+// Model is one model the platform holds. Both fields are exactly as stored:
+// the mRID is matched byte for byte when it is used in a later query, so it
+// is never case-folded or trimmed.
+type Model struct {
+	Name string
+	MRID string
+}
+
+// ModelInfo returns each model's name and mRID in the order the platform
+// returned them. An error reply, a reply without a model list, an empty
+// list, and an entry with a missing or empty name or mRID are all errors.
+func ModelInfo(ctx context.Context, bus Requester) ([]Model, error) {
+	data, err := request(ctx, bus, modelInfoBody)
+	if err != nil {
+		return nil, err
+	}
+	var d struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil {
+		return nil, fmt.Errorf("query: model info: %w", errNotJSON)
+	}
+	if len(d.Models) == 0 {
+		return nil, errors.New("query: reply holds no models")
+	}
+	models := make([]Model, 0, len(d.Models))
+	for i, m := range d.Models {
+		name, nameOK := m["modelName"].(string)
+		mrid, mridOK := m["modelId"].(string)
+		if !nameOK || !mridOK || name == "" || mrid == "" {
+			return nil, fmt.Errorf("query: model %d lacks a non-empty modelName and modelId", i)
+		}
+		models = append(models, Model{Name: name, MRID: mrid})
+	}
+	return models, nil
+}
