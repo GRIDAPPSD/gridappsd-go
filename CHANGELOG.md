@@ -8,6 +8,8 @@ tags.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-30
+
 ### Fixed
 
 - Credential-connection teardown reporting in the token exchange (#31):
@@ -178,7 +180,8 @@ Seeded from `.github/release-notes/v0.1.0.md`.
 - A third defect was in `go-stomp` itself and is third-party; not tracked in
   this repository. Still present; see [0.2.0] "Known issues".
 
-[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.0...main
+[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.1...main
+[0.3.1]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.1.0...v0.2.0
