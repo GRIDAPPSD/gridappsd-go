@@ -197,3 +197,89 @@ func TestModelInfoWrapsTransportError(t *testing.T) {
 		t.Errorf("err = %v, want it to wrap %v", err, cause)
 	}
 }
+
+func TestSPARQLRequest(t *testing.T) {
+	t.Parallel()
+	const text = "SELECT ?s WHERE {\n  ?s a \"x\" . # caf\u00e9 \\ end\n}\n"
+	bus := transporttest.NewReplyBus([]byte(`{"data":{"head":{"vars":[]},"results":{"bindings":[]}}}`))
+	if _, err := query.SPARQL(ctx(t), bus, text); err != nil {
+		t.Fatalf("SPARQL: %v", err)
+	}
+	sent, err := bus.Conn.LastSend()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.Destination != wantDestination {
+		t.Errorf("destination = %q, want %q", sent.Destination, wantDestination)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(sent.Body, &got); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	want := map[string]any{"requestType": "QUERY", "resultFormat": "JSON", "queryString": text}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("body = %v, want exactly %v", got, want)
+	}
+}
+
+func TestSPARQLReturnsReplyVerbatim(t *testing.T) {
+	t.Parallel()
+	inner := `{"head":{"vars":["a"]},"results":{"bindings":[{"a":{"type":"literal","value":"X"}}]}}`
+	innerStr, _ := json.Marshal(inner)
+	for name, reply := range map[string]string{
+		"data as object": "{ \"responseComplete\" : true,\n \"data\":" + inner + "}\n",
+		"data as string": "{\"data\": " + string(innerStr) + "}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, err := query.SPARQL(ctx(t), transporttest.NewReplyBus([]byte(reply)), "SELECT 1")
+			if err != nil {
+				t.Fatalf("SPARQL: %v", err)
+			}
+			if string(got) != reply {
+				t.Errorf("reply = %q, want the exact bytes %q", got, reply)
+			}
+		})
+	}
+}
+
+func TestSPARQLRefusesBadRepliesAndEmptyQuery(t *testing.T) {
+	t.Parallel()
+	for name, reply := range map[string]string{
+		"error member":         `{"error":"boom"}`,
+		"not JSON":             `nope`,
+		"no data":              `{}`,
+		"null data":            `{"data":null}`,
+		"empty data string":    `{"data":""}`,
+		"data string not JSON": `{"data":"not json"}`,
+		"marked incomplete":    `{"responseComplete":false,"data":{"results":{}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, err := query.SPARQL(ctx(t), transporttest.NewReplyBus([]byte(reply)), "SELECT 1")
+			if err == nil {
+				t.Fatalf("SPARQL = %q, nil error; want an error", got)
+			}
+			if got != nil {
+				t.Errorf("reply %q returned alongside an error", got)
+			}
+		})
+	}
+	for _, text := range []string{"", " \n\t"} {
+		bus := transporttest.NewReplyBus([]byte(`{"data":{}}`))
+		if _, err := query.SPARQL(ctx(t), bus, text); err == nil {
+			t.Errorf("empty query %q: nil error", text)
+		}
+		if _, err := bus.Conn.LastSend(); err == nil {
+			t.Errorf("empty query %q was sent", text)
+		}
+	}
+}
+
+func TestSPARQLWrapsTransportError(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("no broker")
+	if _, err := query.SPARQL(ctx(t), failingBus{cause}, "SELECT 1"); !errors.Is(err, cause) {
+		t.Errorf("err = %v, want it to wrap %v", err, cause)
+	}
+}

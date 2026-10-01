@@ -156,3 +156,29 @@ func ModelInfo(ctx context.Context, bus Requester) ([]Model, error) {
 	}
 	return models, nil
 }
+
+// SPARQL runs text as a SPARQL query on the platform's model store and
+// returns the reply exactly as received, so a consumer that reads the
+// platform's own envelope sees every byte. It refuses an empty query and the
+// same bad replies as the other requests; it does not interpret the result.
+func SPARQL(ctx context.Context, bus Requester, text string) ([]byte, error) {
+	if strings.TrimSpace(text) == "" {
+		return nil, errors.New("query: empty SPARQL text")
+	}
+	body, err := json.Marshal(struct {
+		RequestType  string `json:"requestType"`
+		ResultFormat string `json:"resultFormat"`
+		QueryString  string `json:"queryString"`
+	}{"QUERY", "JSON", text})
+	if err != nil {
+		return nil, fmt.Errorf("query: encoding request: %w", err)
+	}
+	reply, err := bus.GetResponse(ctx, topics.Blazegraph, contentType, body)
+	if err != nil {
+		return nil, fmt.Errorf("query: request failed: %w", err)
+	}
+	if _, err := decodeData(reply); err != nil {
+		return nil, err
+	}
+	return reply, nil
+}

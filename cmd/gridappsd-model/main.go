@@ -14,5 +14,5 @@ func main() {
 }
 
 func defaultDeps() deps {
-	return deps{getenv: os.Getenv, dial: dialBroker, now: time.Now}
+	return deps{getenv: os.Getenv, dial: dialBroker, now: time.Now, stdin: os.Stdin}
 }

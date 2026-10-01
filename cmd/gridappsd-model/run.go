@@ -22,6 +22,7 @@ const usage = `usage: gridappsd-model <command> [flags]
 commands:
   names   write the list of model names to a file (--out)
   info    print each model's name and mRID, tab separated
+  query   run a SPARQL query (--query-file or stdin) and write the reply to --out
 
 common flags: --address, --ca-file, --allow-plaintext, --user-env,
 --password-env, --timeout. Credentials are read from the environment
@@ -34,6 +35,7 @@ type deps struct {
 	getenv func(string) string
 	dial   func(ctx context.Context, cfg gridappsd.Config) (query.Requester, func(), error)
 	now    func() time.Time
+	stdin  io.Reader
 }
 
 func dialBroker(ctx context.Context, cfg gridappsd.Config) (query.Requester, func(), error) {
@@ -87,6 +89,8 @@ func run(args []string, stdout, stderr io.Writer, d deps) int {
 		return runNames(args[1:], stdout, stderr, d)
 	case "info":
 		return runInfo(args[1:], stdout, stderr, d)
+	case "query":
+		return runQuery(args[1:], stdout, stderr, d)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return 0

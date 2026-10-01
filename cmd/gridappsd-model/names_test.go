@@ -17,7 +17,9 @@ import (
 
 const testPassword = "test-password-9f3a"
 
-var fixedNow = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+// fixedNow is 03:04:05 UTC, expressed in another zone so a missing UTC
+// conversion shows.
+var fixedNow = time.Date(2026, 1, 2, 8, 4, 5, 0, time.FixedZone("test", 5*3600))
 
 type harness struct {
 	deps deps
@@ -38,7 +40,8 @@ func newHarness(reply string) *harness {
 			*h.cfg = cfg
 			return transporttest.NewReplyBus([]byte(reply)), func() {}, nil
 		},
-		now: func() time.Time { return fixedNow },
+		now:   func() time.Time { return fixedNow },
+		stdin: strings.NewReader(""),
 	}
 	return h
 }
@@ -216,5 +219,14 @@ func TestUsageErrors(t *testing.T) {
 		if code, _, _ := runCmd(t, newHarness(goodReply), args...); code != 2 {
 			t.Errorf("%s: exit %d, want 2", name, code)
 		}
+	}
+}
+
+func TestNamesUnwritableOutFails(t *testing.T) {
+	t.Parallel()
+	out := filepath.Join(t.TempDir(), "absent-dir", "list.txt")
+	code, stdout, _ := runCmd(t, newHarness(goodReply), "names", "--out", out)
+	if code == 0 || stdout != "" {
+		t.Errorf("exit %d, stdout %q; want non-zero and empty stdout", code, stdout)
 	}
 }

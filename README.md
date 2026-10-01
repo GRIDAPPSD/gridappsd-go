@@ -14,9 +14,10 @@ ported; see Status below.
 
 The connection, messaging, and transport layers described below are
 implemented and covered by tests. Of the typed query API (the
-gridappsd-python `GridAPPSDClient` request helpers), only `query.ModelNames`
-and `query.ModelInfo` are ported so far, and the `gridappsd-model` command
-ships with `names` and `info` subcommands over them. The rest is not yet ported; see
+gridappsd-python `GridAPPSDClient` request helpers), only `query.ModelNames`,
+`query.ModelInfo` and `query.SPARQL` are ported so far, and the
+`gridappsd-model` command ships with `names`, `info` and `query` subcommands
+over them. The rest is not yet ported; see
 [CHANGELOG.md](CHANGELOG.md) for what has shipped so far.
 
 ## Installation
@@ -194,7 +195,8 @@ answers would block forever; bound it as shown above.
 - `message`: STOMP frame header name constants used by the GOSS protocol.
 - `query`: typed requests on the model data destination. `ModelNames`
   returns the names of the models the platform holds, and `ModelInfo` returns
-  each model's name and mRID exactly as stored.
+  each model's name and mRID exactly as stored. `SPARQL` runs a SPARQL query on
+  the model store and returns the platform's reply bytes unchanged.
 - `topics`: destination-naming helpers and well-known GridAPPS-D topic
   constants.
 - `transport`: the STOMP connection interfaces (`Conn`, `Subscription`,
@@ -217,7 +219,16 @@ its names are kept and the new ones added; a failed or empty reply writes
 nothing and exits non-zero.
 
 `info` prints one line per model, the name and the mRID separated by a tab,
-sorted by name, both exactly as the platform returned them. Credentials are read only from the environment
+sorted by name, both exactly as the platform returned them.
+
+`query` reads SPARQL text from `--query-file` (standard input when it is
+absent), sends it with result format JSON, and writes the reply bytes
+unchanged to `--out`. It refuses an empty query, a reply that is not JSON, a
+reply with an `error` member, a reply with no `data`, and a reply marked
+`responseComplete: false`; on any failure it writes nothing, leaves an
+existing `--out` as it was, and exits non-zero. On success it prints an
+`endpoint:` line (broker address and destination) and a `queried at:` line
+(RFC 3339, UTC). Credentials are read only from the environment
 variables named by `--user-env` and `--password-env` (default
 `GRIDAPPSD_USER` and `GRIDAPPSD_PASSWORD`); there is no credential flag.
 `--allow-plaintext` and `--ca-file` select the transport as in `Config`.
