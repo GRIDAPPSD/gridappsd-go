@@ -65,10 +65,11 @@ func realFDListener(t *testing.T, conns int) (net.Listener, <-chan struct{}) {
 	return ln, closed
 }
 
-// assertNoFDLeak runs attempt fdLeakAttempts times, each expected to fail
-// after dialing the listener once through dialReal, and fails the test if the
-// process holds more descriptors afterwards than before.
-func assertNoFDLeak(t *testing.T, what string, attempt func(dialReal auth.NetDialer) error) {
+// assertNoFDLeak runs attempt fdLeakAttempts times, each dialing the listener
+// once through dialReal and expected to fail when wantErr is set and to
+// succeed otherwise, and fails the test if the process holds more descriptors
+// afterwards than before.
+func assertNoFDLeak(t *testing.T, what string, wantErr bool, attempt func(dialReal auth.NetDialer) error) {
 	t.Helper()
 	// Not parallel: disables the GC process-wide for its duration so a
 	// spontaneous collection cannot reclaim a leaked descriptor through the
@@ -85,8 +86,8 @@ func assertNoFDLeak(t *testing.T, what string, attempt func(dialReal auth.NetDia
 
 	before := countOpenFDs(t)
 	for i := 0; i < fdLeakAttempts; i++ {
-		if err := attempt(dialReal); err == nil {
-			t.Fatalf("attempt %d: expected an error, got nil", i)
+		if err := attempt(dialReal); (err != nil) != wantErr {
+			t.Fatalf("attempt %d: error = %v, want an error: %v", i, err, wantErr)
 		}
 	}
 	for i := 0; i < fdLeakAttempts; i++ {
@@ -121,7 +122,7 @@ func (d *failingDialer) Dial(_ context.Context, _ io.ReadWriteCloser, _ transpor
 // dialed socket does not leak when the STOMP CONNECT handshake fails.
 func TestFetchToken_ClosesCredentialConnOnDialError(t *testing.T) {
 	dialer := &failingDialer{err: errors.New("stomp connect: login refused")}
-	assertNoFDLeak(t, "refused logins", func(dialReal auth.NetDialer) error {
+	assertNoFDLeak(t, "refused logins", true, func(dialReal auth.NetDialer) error {
 		_, err := auth.Exchange(context.Background(), dialReal, dialer, "u", "p", time.Second, nil, nil)
 		return err
 	})
@@ -156,7 +157,7 @@ func TestExchange_ClosesSecondConnOnDialError(t *testing.T) {
 	// and giving it a real fd here would fold an unrelated fake's cleanup
 	// behavior into the count this test asserts on. Only the durable leg,
 	// the one under test, dials a real, fd-backed connection.
-	assertNoFDLeak(t, "refused second-leg logins", func(dialReal auth.NetDialer) error {
+	assertNoFDLeak(t, "refused second-leg logins", true, func(dialReal auth.NetDialer) error {
 		callN := 0
 		netDial := func(ctx context.Context) (io.ReadWriteCloser, error) {
 			callN++
@@ -351,7 +352,15 @@ func requireTeardownLogged(t *testing.T, conn1 transport.Conn, disconnected func
 	if disconnected != nil && !disconnected() {
 		t.Error("credential connection was not disconnected")
 	}
+	requireTeardownRecord(t, h, true, match)
+}
 
+// requireTeardownRecord requires h to hold exactly one Warn record naming the
+// credential connection teardown, with token_received equal to tokenReceived,
+// an "error" attribute that satisfies match and renders on one line, and no
+// credential or token.
+func requireTeardownRecord(t *testing.T, h *recordingHandler, tokenReceived bool, match func(error) bool) {
+	t.Helper()
 	recs := h.snapshot()
 	if len(recs) != 1 {
 		t.Fatalf("got %d log records, want 1: %+v", len(recs), recs)
@@ -363,8 +372,8 @@ func requireTeardownLogged(t *testing.T, conn1 transport.Conn, disconnected func
 	if !strings.Contains(rec.msg, "credential connection teardown") {
 		t.Errorf("record message = %q, want it to name the credential connection teardown", rec.msg)
 	}
-	if v, ok := rec.attrs["token_received"]; !ok || v.Kind() != slog.KindBool || !v.Bool() {
-		t.Errorf("token_received attr = %v (present %v), want true", v, ok)
+	if v, ok := rec.attrs["token_received"]; !ok || v.Kind() != slog.KindBool || v.Bool() != tokenReceived {
+		t.Errorf("token_received attr = %v (present %v), want %v", v, ok, tokenReceived)
 	}
 	v, ok := rec.attrs["error"]
 	if !ok {
@@ -373,6 +382,9 @@ func requireTeardownLogged(t *testing.T, conn1 transport.Conn, disconnected func
 	logged, isErr := v.Any().(error)
 	if !isErr || !match(logged) {
 		t.Errorf("error attr = %v, does not match the teardown failure", v)
+	}
+	if isErr && strings.Contains(logged.Error(), "\n") {
+		t.Errorf("error attr %q spans more than one line", logged.Error())
 	}
 	payload := base64.StdEncoding.EncodeToString([]byte(secretUser + ":" + secretPass))
 	for _, secret := range []string{secretPass, fakeToken, payload} {
@@ -503,17 +515,21 @@ func TestExchange_NilLoggerUsesSlogDefault(t *testing.T) {
 type cancellingSub struct {
 	*fakeSub
 	cancel context.CancelFunc
+	err    error
 }
 
 func (s *cancellingSub) Unsubscribe() error {
 	s.cancel()
 	s.fakeSub.closeC()
-	return errUnsubscribeFailed
+	return s.err
 }
 
+// cancellingSubConn hands out a cancellingSub that fails with unsubErr, or
+// with errUnsubscribeFailed when unsubErr is nil.
 type cancellingSubConn struct {
 	*fakeConn
-	cancel context.CancelFunc
+	cancel   context.CancelFunc
+	unsubErr error
 }
 
 func (c *cancellingSubConn) Subscribe(ctx context.Context, dest string) (transport.Subscription, error) {
@@ -521,7 +537,11 @@ func (c *cancellingSubConn) Subscribe(ctx context.Context, dest string) (transpo
 	if err != nil {
 		return nil, err
 	}
-	return &cancellingSub{fakeSub: sub.(*fakeSub), cancel: c.cancel}, nil
+	err = c.unsubErr
+	if err == nil {
+		err = errUnsubscribeFailed
+	}
+	return &cancellingSub{fakeSub: sub.(*fakeSub), cancel: c.cancel, err: err}, nil
 }
 
 // cancellingDisconnectConn is a fakeConn whose Disconnect cancels the
@@ -641,4 +661,141 @@ func TestFetchToken_CancelDuringUnsubscribeWrapsBoth(t *testing.T) {
 	if recs := h.snapshot(); len(recs) != 0 {
 		t.Errorf("got log records %+v, want none on the context path", recs)
 	}
+}
+
+var errTokenSendFailed = errors.New("token send refused")
+
+// sendFailingConn fails the token SEND, so the exchange fails before any
+// token arrives, and otherwise behaves as the transport.Conn it wraps.
+type sendFailingConn struct{ transport.Conn }
+
+func (sendFailingConn) Send(context.Context, string, string, []byte, map[string]string) error {
+	return errTokenSendFailed
+}
+
+// TestFetchToken_TeardownFailureAfterFailedExchangeIsLogged proves that a
+// teardown step failure after the exchange already failed reaches the logger
+// with token_received=false, also when the context ends during that teardown,
+// and that the exchange still fails with its own error.
+func TestFetchToken_TeardownFailureAfterFailedExchangeIsLogged(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) (context.Context, transport.Conn)
+	}{
+		{"context live", func(t *testing.T) (context.Context, transport.Conn) {
+			return context.Background(), &failingConn{fakeConn: newFakeConn(""), failUnsub: true}
+		}},
+		{"context ends during teardown", func(t *testing.T) (context.Context, transport.Conn) {
+			ctx := newLateDoneCtx()
+			t.Cleanup(func() { close(ctx.done) })
+			return ctx, &cancellingSubConn{fakeConn: newFakeConn(""), cancel: ctx.cancel}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, conn1 := tc.setup(t)
+			h := &recordingHandler{}
+			dialer := newFakeDialer(sendFailingConn{conn1}, newFakeConn(""))
+
+			conn, err := auth.Exchange(ctx, netDialStub, dialer, secretUser, secretPass, 10*time.Second, nil, slog.New(h))
+			if !errors.Is(err, errTokenSendFailed) || errors.Is(err, errUnsubscribeFailed) {
+				t.Fatalf("Exchange error = %v, want the token send failure and not the teardown failure", err)
+			}
+			if conn != nil {
+				t.Errorf("Exchange returned a connection alongside error %v", err)
+			}
+			if len(dialer.calls) != 1 {
+				t.Errorf("dialer called %d times, want 1", len(dialer.calls))
+			}
+			requireTeardownRecord(t, h, false, func(err error) bool {
+				return errors.Is(err, errUnsubscribeFailed)
+			})
+		})
+	}
+}
+
+// TestFetchToken_TeardownFailureClosesCredentialSocket proves the credential
+// leg's socket is closed when a teardown step fails while the context is
+// live; on that path neither the context nor the transport closes it.
+func TestFetchToken_TeardownFailureClosesCredentialSocket(t *testing.T) {
+	cases := []struct {
+		name                      string
+		failUnsub, failDisconnect bool
+	}{
+		{"unsubscribe fails", true, false},
+		{"disconnect fails", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			realDials := 0
+			assertNoFDLeak(t, "teardown failures", false, func(dialReal auth.NetDialer) error {
+				callN := 0
+				netDial := func(ctx context.Context) (io.ReadWriteCloser, error) {
+					callN++
+					if callN == 1 {
+						// The listener resets each connection at once, which
+						// can reach the dial before it completes; that attempt
+						// has no socket to leak, so it runs on a stub.
+						rwc, err := dialReal(ctx)
+						if err != nil {
+							return nopRWC{}, nil
+						}
+						realDials++
+						return rwc, nil
+					}
+					return nopRWC{}, nil
+				}
+				conn1 := &failingConn{fakeConn: newFakeConn(fakeToken), failUnsub: tc.failUnsub, failDisconnect: tc.failDisconnect}
+				dialer := newFakeDialer(conn1, newFakeConn(""))
+				_, err := auth.Exchange(context.Background(), netDial, dialer, "u", "p", time.Second, nil, slog.New(slog.DiscardHandler))
+				return err
+			})
+			if realDials < fdLeakAttempts/2 {
+				t.Fatalf("only %d of %d attempts dialed a real socket; the descriptor count measured too little", realDials, fdLeakAttempts)
+			}
+		})
+	}
+}
+
+// TestFetchToken_OversizedTeardownErrorIsBounded proves that a teardown error
+// carrying megabytes of text, which a broker controls, reaches neither the
+// log record nor the returned error whole, and still matches with errors.Is.
+func TestFetchToken_OversizedTeardownErrorIsBounded(t *testing.T) {
+	const maxText = 1024
+	huge := errors.New(strings.Repeat("E", 4<<20))
+	matchHuge := func(err error) bool { return errors.Is(err, huge) && len(err.Error()) <= maxText }
+
+	t.Run("logged", func(t *testing.T) {
+		h := &recordingHandler{}
+		conn1 := &hugeDisconnectConn{fakeConn: newFakeConn(fakeToken), err: huge}
+		dialer := newFakeDialer(conn1, newFakeConn(""))
+		if _, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second, nil, slog.New(h)); err != nil {
+			t.Fatalf("Exchange error = %v, want nil", err)
+		}
+		requireTeardownRecord(t, h, true, matchHuge)
+	})
+	t.Run("returned", func(t *testing.T) {
+		ctx := newLateDoneCtx()
+		t.Cleanup(func() { close(ctx.done) })
+		conn1 := &cancellingSubConn{fakeConn: newFakeConn(fakeToken), cancel: ctx.cancel, unsubErr: huge}
+		dialer := newFakeDialer(conn1, newFakeConn(""))
+		_, err := auth.Exchange(ctx, netDialStub, dialer, "u", "p", 10*time.Second, nil, slog.New(slog.DiscardHandler))
+		if err == nil {
+			t.Fatal("Exchange error = nil, want a credential connection teardown error")
+		}
+		if !errors.Is(err, context.Canceled) || !matchHuge(err) {
+			t.Fatalf("Exchange error is %d bytes, wraps Canceled %v and the step error %v; want at most %d bytes wrapping both", len(err.Error()), errors.Is(err, context.Canceled), errors.Is(err, huge), maxText)
+		}
+	})
+}
+
+// hugeDisconnectConn is a fakeConn whose Disconnect fails with err.
+type hugeDisconnectConn struct {
+	*fakeConn
+	err error
+}
+
+func (c *hugeDisconnectConn) Disconnect() error {
+	_ = c.fakeConn.Disconnect()
+	return c.err
 }

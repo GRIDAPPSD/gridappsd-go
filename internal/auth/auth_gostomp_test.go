@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -43,7 +44,14 @@ const (
 	// connection is closed as soon as the token reply is written, before
 	// UNSUBSCRIBE or DISCONNECT can be answered.
 	brokerCloseAfterToken
+	// brokerErrorOnDisconnect is brokerAnswering except that DISCONNECT is
+	// answered with an ERROR frame whose message header is oversizedErrLen
+	// bytes long.
+	brokerErrorOnDisconnect
 )
+
+// oversizedErrLen is the length of brokerErrorOnDisconnect's ERROR message.
+const oversizedErrLen = 4 << 20
 
 // floodExtra is how many messages brokerFlood sends after the token: more
 // than go-stomp's and the bridge's channel buffers (16 each) can absorb.
@@ -189,8 +197,12 @@ func (b *stompBroker) serve(idx int, c net.Conn) {
 				}
 			}
 		}
+		if b.mode == brokerErrorOnDisconnect && f.Command == frame.DISCONNECT {
+			out = append(out, frame.New(frame.ERROR, frame.Message, strings.Repeat("E", oversizedErrLen)))
+		}
 		receipt, ok := f.Header.Contains(frame.Receipt)
 		answer := b.mode != brokerSilent &&
+			!(b.mode == brokerErrorOnDisconnect && f.Command == frame.DISCONNECT) &&
 			!(b.mode == brokerNoDisconnectReceipt && f.Command == frame.DISCONNECT) &&
 			!(b.mode == brokerNoUnsubscribeReceipt && f.Command == frame.UNSUBSCRIBE)
 		if ok && answer {
@@ -511,4 +523,48 @@ func TestExchange_FloodedReplyQueueDoesNotStallTeardown(t *testing.T) {
 		t.Fatalf("durable Disconnect: %v", err)
 	}
 	waitForGoroutines(t, before, 5*time.Second)
+}
+
+// TestExchange_OversizedBrokerErrorIsBoundedInLog runs the real stack against
+// a broker that answers DISCONNECT with a 4 MiB ERROR message. The teardown
+// failure must still be logged with the token kept, but as one bounded line
+// under each standard handler rather than a copy of the broker's text.
+func TestExchange_OversizedBrokerErrorIsBoundedInLog(t *testing.T) {
+	const maxLine = 1024
+	handlers := map[string]func(io.Writer) slog.Handler{
+		"text": func(w io.Writer) slog.Handler { return slog.NewTextHandler(w, nil) },
+		"json": func(w io.Writer) slog.Handler { return slog.NewJSONHandler(w, nil) },
+	}
+	for name, newHandler := range handlers {
+		t.Run(name, func(t *testing.T) {
+			b := startStompBroker(t, brokerErrorOnDisconnect)
+			var buf bytes.Buffer
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			conn, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, secretUser, secretPass, 0, &transport.HeartBeatIntervals{}, slog.New(newHandler(&buf)))
+			if err != nil {
+				t.Fatalf("Exchange error = %v, want nil: a DISCONNECT ERROR after the token arrived must not fail the exchange", err)
+			}
+			_ = conn.Disconnect()
+
+			out := buf.String()
+			if n := strings.Count(out, "\n"); n != 1 {
+				t.Fatalf("handler wrote %d lines (%d bytes), want 1", n, len(out))
+			}
+			if len(out) > maxLine {
+				t.Errorf("log line is %d bytes, want at most %d", len(out), maxLine)
+			}
+			for _, want := range []string{"credential connection teardown", "EEEE", "truncated"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("log line %q does not contain %q", out, want)
+				}
+			}
+			payload := base64.StdEncoding.EncodeToString([]byte(secretUser + ":" + secretPass))
+			for _, secret := range []string{secretPass, fakeToken, payload} {
+				if strings.Contains(out, secret) {
+					t.Errorf("log line carries a secret %q", secret)
+				}
+			}
+		})
+	}
 }
