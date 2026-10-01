@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"runtime"
@@ -942,14 +943,14 @@ func TestFetchToken_EscapedStepErrorReportsRawLength(t *testing.T) {
 
 // TestFetchToken_StepErrorEscapesEachControlByte proves every byte of the
 // control range and DEL is escaped when it is the only thing that needs
-// escaping, so neither the quick check nor the escaping loop can drop one.
+// escaping, so the escaping loop cannot drop one.
 func TestFetchToken_StepErrorEscapesEachControlByte(t *testing.T) {
-	var bytes []byte
+	var ctrl []byte
 	for c := 0; c <= 0x1f; c++ {
-		bytes = append(bytes, byte(c))
+		ctrl = append(ctrl, byte(c))
 	}
-	bytes = append(bytes, 0x7f)
-	for _, c := range bytes {
+	ctrl = append(ctrl, 0x7f)
+	for _, c := range ctrl {
 		text := "a" + string([]byte{c}) + "b"
 		want := "a\\x" + string("0123456789abcdef"[c>>4]) + string("0123456789abcdef"[c&15]) + "b"
 		if got := loggedTeardownText(t, nil, errors.New(text)).Error(); got != want {
@@ -998,7 +999,7 @@ func TestFetchToken_StepErrorEscapesOtherLineBreakers(t *testing.T) {
 		{"first rune past C1 kept", "a\u00a0b", "a\u00a0b"},
 		{"line separator", "a\u2028b", `a\u2028b`},
 		{"paragraph separator", "a\u2029b", `a\u2029b`},
-		{"rune after separators kept", "a\u202ab", "a\u202ab"},
+		{"rune after separators kept", "a\u202fb", "a\u202fb"},
 		{"invalid lone continuation byte", "a\x80b", `a\x80b`},
 		{"invalid truncated rune", "a\xe2\x82b", `a\xe2\x82b`},
 		{"invalid byte 0xff", "a\xffb", `a\xffb`},
@@ -1016,17 +1017,71 @@ func TestFetchToken_StepErrorEscapesOtherLineBreakers(t *testing.T) {
 	}
 }
 
+// TestFetchToken_StepErrorEscapesFormatCharacters proves each Unicode format
+// character class is written as an escape at both edges of its range, and
+// that the runes just outside each range are kept.
+func TestFetchToken_StepErrorEscapesFormatCharacters(t *testing.T) {
+	cases := []struct{ name, text, want string }{
+		{"ALM", "a\u061cb", `a\u061cb`},
+		{"before ALM kept", "a\u061bb", "a\u061bb"},
+		{"after ALM kept", "a\u061db", "a\u061db"},
+		{"zero width first", "a\u200bb", `a\u200bb`},
+		{"zero width last", "a\u200db", `a\u200db`},
+		{"LRM", "a\u200eb", `a\u200eb`},
+		{"RLM", "a\u200fb", `a\u200fb`},
+		{"before zero width kept", "a\u200ab", "a\u200ab"},
+		{"bidi embedding first", "a\u202ab", `a\u202ab`},
+		{"bidi override last", "a\u202eb", `a\u202eb`},
+		{"after bidi override kept", "a\u202fb", "a\u202fb"},
+		{"word joiner", "a\u2060b", `a\u2060b`},
+		{"before word joiner kept", "a\u205fb", "a\u205fb"},
+		{"bidi isolate first", "a\u2066b", `a\u2066b`},
+		{"bidi isolate last", "a\u2069b", `a\u2069b`},
+		{"after bidi isolate kept", "a\u206ab", "a\u206ab"},
+		{"byte order mark", "a\ufeffb", `a\ufeffb`},
+		{"before byte order mark kept", "a\ufefeb", "a\ufefeb"},
+		{"after byte order mark kept", "a\uff00b", "a\uff00b"},
+		{"tag first", "a\U000e0000b", `a\U000e0000b`},
+		{"tag last", "a\U000e007fb", `a\U000e007fb`},
+		{"before tags kept", "a\U000dffffb", "a\U000dffffb"},
+		{"after tags kept", "a\U000e0080b", "a\U000e0080b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := loggedTeardownText(t, nil, errors.New(tc.text)).Error(); got != tc.want {
+				t.Errorf("logged %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFetchToken_StepErrorCutKeepsTagEscapeWhole proves a ten-byte tag escape
+// is dropped whole when it would cross the bound.
+func TestFetchToken_StepErrorCutKeepsTagEscapeWhole(t *testing.T) {
+	text := strings.Repeat("a", 505) + "\U000e0041" + "bbb"
+	logged := loggedTeardownText(t, nil, errors.New(text)).Error()
+	if want := strings.Repeat("a", 505) + "... (truncated, " + strconv.Itoa(len(text)) + " bytes)"; logged != want {
+		t.Errorf("logged tail %q, want %q", logged[max(0, len(logged)-40):], want[max(0, len(want)-40):])
+	}
+}
+
 // TestFetchToken_StepErrorEscapesOnlyWhatItKeeps proves Error() on a huge
 // message allocates for the bound rather than for the message.
 func TestFetchToken_StepErrorEscapesOnlyWhatItKeeps(t *testing.T) {
 	logged := loggedTeardownText(t, nil, errors.New(strings.Repeat("\n", 4<<20)))
 
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	text := logged.Error()
-	runtime.ReadMemStats(&after)
-
-	if got := after.TotalAlloc - before.TotalAlloc; got > 64<<10 {
+	// TotalAlloc is process-wide, so other goroutines can only add to a
+	// reading; the smallest of several is the one closest to Error() alone.
+	var text string
+	got := uint64(math.MaxUint64)
+	for range 5 {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		text = logged.Error()
+		runtime.ReadMemStats(&after)
+		got = min(got, after.TotalAlloc-before.TotalAlloc)
+	}
+	if got > 64<<10 {
 		t.Errorf("Error() allocated %d bytes for a %d byte message, want at most 64 KiB", got, 4<<20)
 	}
 	if !strings.HasSuffix(text, "... (truncated, 4194304 bytes)") {

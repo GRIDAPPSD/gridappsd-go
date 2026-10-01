@@ -10,6 +10,10 @@ tags.
 
 ### Fixed
 
+- Unicode format characters in teardown error text are escaped (#39): the
+  bidirectional controls, zero-width characters and the byte order mark are
+  written as `\uNNNN` and the tag characters as `\UNNNNNNNN`, so broker text
+  can no longer reorder or hide part of a log line.
 - Escaping of teardown error text in the token exchange (#36):
   - a backslash in a teardown error is written as `\\`, so a literal `\x0a`
     from the broker no longer reads like an escaped line break;
