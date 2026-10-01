@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GRIDAPPSD/gridappsd-go/internal/auth"
 	"github.com/GRIDAPPSD/gridappsd-go/transport"
@@ -798,4 +799,142 @@ type hugeDisconnectConn struct {
 func (c *hugeDisconnectConn) Disconnect() error {
 	_ = c.fakeConn.Disconnect()
 	return c.err
+}
+
+// errStepSub is a fakeSub whose Unsubscribe ends the subscription and then
+// fails with err.
+type errStepSub struct {
+	*fakeSub
+	err error
+}
+
+func (s *errStepSub) Unsubscribe() error {
+	s.fakeSub.closeC()
+	return s.err
+}
+
+// errStepConn is a fakeConn whose Unsubscribe fails with unsubErr and whose
+// Disconnect fails with disconnectErr.
+type errStepConn struct {
+	*fakeConn
+	unsubErr, disconnectErr error
+}
+
+func (c *errStepConn) Subscribe(ctx context.Context, dest string) (transport.Subscription, error) {
+	sub, err := c.fakeConn.Subscribe(ctx, dest)
+	if err != nil {
+		return nil, err
+	}
+	return &errStepSub{fakeSub: sub.(*fakeSub), err: c.unsubErr}, nil
+}
+
+func (c *errStepConn) Disconnect() error {
+	_ = c.fakeConn.Disconnect()
+	return c.disconnectErr
+}
+
+// loggedTeardownText runs an exchange whose credential connection fails its
+// teardown steps with unsubErr and disconnectErr after the token arrived, and
+// returns the teardown error the logger received.
+func loggedTeardownText(t *testing.T, unsubErr, disconnectErr error) error {
+	t.Helper()
+	h := &recordingHandler{}
+	conn1 := &errStepConn{fakeConn: newFakeConn(fakeToken), unsubErr: unsubErr, disconnectErr: disconnectErr}
+	dialer := newFakeDialer(conn1, newFakeConn(""))
+	if _, err := auth.Exchange(context.Background(), netDialStub, dialer, "u", "p", 10*time.Second, nil, slog.New(h)); err != nil {
+		t.Fatalf("Exchange error = %v, want nil", err)
+	}
+	recs := h.snapshot()
+	if len(recs) != 1 {
+		t.Fatalf("got %d log records, want 1: %+v", len(recs), recs)
+	}
+	logged, ok := recs[0].attrs["error"].Any().(error)
+	if !ok {
+		t.Fatalf("error attr = %v, want an error", recs[0].attrs["error"])
+	}
+	return logged
+}
+
+// TestFetchToken_EachStepErrorIsBounded proves the bound applies to each
+// teardown step on its own, so a huge UNSUBSCRIBE error cannot push the
+// DISCONNECT error out of the logged text, and that both still match.
+func TestFetchToken_EachStepErrorIsBounded(t *testing.T) {
+	hugeUnsub := errors.New(strings.Repeat("U", 4<<20))
+	disc := errors.New("DISCONNECT-MARK short disconnect failure")
+
+	logged := loggedTeardownText(t, hugeUnsub, disc)
+
+	if !errors.Is(logged, hugeUnsub) || !errors.Is(logged, disc) {
+		t.Errorf("logged error does not match both step errors: unsubscribe %v, disconnect %v", errors.Is(logged, hugeUnsub), errors.Is(logged, disc))
+	}
+	if !strings.Contains(logged.Error(), "DISCONNECT-MARK short disconnect failure") {
+		t.Errorf("logged text %q lost the DISCONNECT error behind the UNSUBSCRIBE error", logged.Error())
+	}
+	if len(logged.Error()) > 1100 {
+		t.Errorf("logged text is %d bytes, want at most 1100 for two bounded steps", len(logged.Error()))
+	}
+}
+
+// TestFetchToken_StepErrorCutKeepsRunesWhole proves a cut that would land
+// inside a multibyte rune moves back to the rune start, and that valid
+// multibyte text under the bound passes through unchanged.
+func TestFetchToken_StepErrorCutKeepsRunesWhole(t *testing.T) {
+	t.Run("rune straddles the bound", func(t *testing.T) {
+		// Bytes 511 to 513 are the three bytes of one rune, so a cut at 512
+		// falls on a continuation byte.
+		text := strings.Repeat("a", 511) + "€" + strings.Repeat("b", 600)
+		logged := loggedTeardownText(t, nil, errors.New(text)).Error()
+
+		if !utf8.ValidString(logged) {
+			t.Fatalf("logged text is not valid UTF-8: %q", logged[:min(len(logged), 560)])
+		}
+		wantPrefix := strings.Repeat("a", 511) + "..."
+		if !strings.HasPrefix(logged, wantPrefix) {
+			t.Errorf("logged text starts %q, want the 511 bytes before the rune then the truncation marker", logged[:min(len(logged), 530)])
+		}
+		if !strings.Contains(logged, "truncated, 1114 bytes") {
+			t.Errorf("logged text %q does not report the full length 1114", logged[min(len(logged), 511):])
+		}
+	})
+	t.Run("short multibyte text is unchanged", func(t *testing.T) {
+		const text = "café € timeout"
+		if logged := loggedTeardownText(t, nil, errors.New(text)).Error(); logged != text {
+			t.Errorf("logged text = %q, want %q", logged, text)
+		}
+	})
+}
+
+// TestFetchToken_StepErrorControlCharsAreEscaped proves a broker message with
+// line breaks and terminal escapes reaches the log as one line of printable
+// text, without losing what it said.
+func TestFetchToken_StepErrorControlCharsAreEscaped(t *testing.T) {
+	text := "first\nsecond\r\x1b[31mred\x00\x7f end"
+	logged := loggedTeardownText(t, nil, errors.New(text))
+
+	for i := 0; i < len(logged.Error()); i++ {
+		if c := logged.Error()[i]; c < 0x20 || c == 0x7f {
+			t.Fatalf("logged text %q holds control byte 0x%02x at %d", logged.Error(), c, i)
+		}
+	}
+	for _, want := range []string{"first", "second", "red", "end"} {
+		if !strings.Contains(logged.Error(), want) {
+			t.Errorf("logged text %q lost %q", logged.Error(), want)
+		}
+	}
+	if logged.Error() == text {
+		t.Errorf("logged text %q was not changed from the raw broker text", logged.Error())
+	}
+}
+
+// TestFetchToken_EscapedStepErrorReportsRawLength proves the bound applies to
+// the escaped text and the reported length is the broker's own byte count.
+func TestFetchToken_EscapedStepErrorReportsRawLength(t *testing.T) {
+	logged := loggedTeardownText(t, nil, errors.New(strings.Repeat("\n", 300))).Error()
+
+	if !strings.HasSuffix(logged, "... (truncated, 300 bytes)") {
+		t.Errorf("logged text %q does not end by reporting the raw length 300", logged[max(0, len(logged)-60):])
+	}
+	if len(logged) > 600 {
+		t.Errorf("logged text is %d bytes, want the escaped text capped near 512", len(logged))
+	}
 }
