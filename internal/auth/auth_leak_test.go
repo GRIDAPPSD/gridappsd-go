@@ -882,7 +882,7 @@ func TestFetchToken_StepErrorCutKeepsRunesWhole(t *testing.T) {
 	t.Run("rune straddles the bound", func(t *testing.T) {
 		// Bytes 511 to 513 are the three bytes of one rune, so a cut at 512
 		// falls on a continuation byte.
-		text := strings.Repeat("a", 511) + "€" + strings.Repeat("b", 600)
+		text := strings.Repeat("a", 511) + "\u20ac" + strings.Repeat("b", 600)
 		logged := loggedTeardownText(t, nil, errors.New(text)).Error()
 
 		if !utf8.ValidString(logged) {
@@ -897,7 +897,7 @@ func TestFetchToken_StepErrorCutKeepsRunesWhole(t *testing.T) {
 		}
 	})
 	t.Run("short multibyte text is unchanged", func(t *testing.T) {
-		const text = "café € timeout"
+		const text = "caf\u00e9 \u20ac timeout"
 		if logged := loggedTeardownText(t, nil, errors.New(text)).Error(); logged != text {
 			t.Errorf("logged text = %q, want %q", logged, text)
 		}
