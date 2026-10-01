@@ -141,7 +141,7 @@ func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, 
 		if ctx.Err() == nil {
 			derr = conn.Disconnect()
 		}
-		gotStep = joinSteps(uerr, derr)
+		gotStep = joinSteps(bound(uerr), bound(derr))
 		// A step the close cut short reads as finished, so a done ctx is
 		// reported whichever of done and ctx.Done the caller sees first.
 		gotCtx = ctx.Err()
@@ -159,7 +159,8 @@ func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, 
 }
 
 // joinSteps joins the teardown step errors on one line, since the result is
-// logged and errors.Join would put a newline between them.
+// logged and errors.Join would put a newline between them. Each step error is
+// bounded before the join so neither can hide the other.
 func joinSteps(uerr, derr error) error {
 	if uerr != nil && derr != nil {
 		return fmt.Errorf("%w; %w", uerr, derr)
@@ -170,12 +171,15 @@ func joinSteps(uerr, derr error) error {
 	return derr
 }
 
-// boundedError caps the text of err at maxStepErrLen bytes and still unwraps
-// to err.
+// boundedError renders err as one line of printable text, capped at
+// maxStepErrLen bytes, and still unwraps to err. The text can come from a
+// broker, so control characters are escaped before the cap: a line break would
+// split a log line, and an escape sequence would reach whoever reads it.
 type boundedError struct{ err error }
 
 func (e boundedError) Error() string {
-	s := e.err.Error()
+	raw := e.err.Error()
+	s := escapeControl(raw)
 	if len(s) <= maxStepErrLen {
 		return s
 	}
@@ -183,7 +187,32 @@ func (e boundedError) Error() string {
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
-	return fmt.Sprintf("%s... (truncated, %d bytes)", s[:cut], len(s))
+	return fmt.Sprintf("%s... (truncated, %d bytes)", s[:cut], len(raw))
+}
+
+// escapeControl replaces each ASCII control byte of s, DEL included, with a
+// \xNN escape. Other bytes, multibyte runes among them, are kept.
+func escapeControl(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == 0x7f {
+			fmt.Fprintf(&b, "\\x%02x", c)
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// bound wraps a non-nil err in a boundedError.
+func bound(err error) error {
+	if err == nil {
+		return nil
+	}
+	return boundedError{err}
 }
 
 func (e boundedError) Unwrap() error { return e.err }
@@ -246,7 +275,6 @@ func fetchToken(
 				// step does not show that the transport closed rwc1.
 				_ = rwc1.Close()
 			}
-			stepErr = boundedError{stepErr}
 		}
 		switch {
 		case ctxErr != nil && err == nil:

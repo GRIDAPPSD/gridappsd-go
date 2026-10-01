@@ -17,11 +17,20 @@ tags.
     with its own error;
   - the credential connection is closed after a teardown step fails while
     the context is live, instead of being left to the transport;
-  - the logged and returned teardown error text is cut to 512 bytes plus
-    its full length, so a broker ERROR message of any size no longer
-    reaches the log whole;
+  - the text a teardown error reports through `Error()` is cut to 512
+    bytes plus its full length, so a broker ERROR message of any size no
+    longer reaches a log that prints that text; a handler that unwraps the
+    error still reaches the full message;
   - an UNSUBSCRIBE and a DISCONNECT failure are joined with `; ` rather
     than a newline.
+
+- Teardown error text in the token exchange (#34):
+  - the 512-byte bound applies to each of the UNSUBSCRIBE and DISCONNECT
+    errors before they are joined, so a long UNSUBSCRIBE message no longer
+    hides the DISCONNECT error;
+  - ASCII control characters in a teardown error, line breaks and terminal
+    escapes among them, are written as `\xNN` escapes, so a broker message
+    cannot split a log line.
 
 ## [0.3.0] - 2026-09-30
 
