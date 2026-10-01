@@ -8,6 +8,21 @@ tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- Credential-connection teardown reporting in the token exchange (#31):
+  - a teardown step failure after the exchange had already failed is
+    logged with `token_received=false` also when the context ends during
+    the teardown, where it was dropped before; the exchange still fails
+    with its own error;
+  - the credential connection is closed after a teardown step fails while
+    the context is live, instead of being left to the transport;
+  - the logged and returned teardown error text is cut to 512 bytes plus
+    its full length, so a broker ERROR message of any size no longer
+    reaches the log whole;
+  - an UNSUBSCRIBE and a DISCONNECT failure are joined with `; ` rather
+    than a newline.
+
 ## [0.3.0] - 2026-09-30
 
 ### Added
