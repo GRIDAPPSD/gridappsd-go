@@ -210,6 +210,7 @@ per-release notes published alongside each tag.
 
 ## License and notice
 
-Licensed under the [BSD 2-Clause "Simplified" License](LICENSE.md).
-See [NOTICE.md](NOTICE.md) for the Battelle Memorial Institute attribution
-and disclaimer that accompanies this license.
+Licensed under the terms in [LICENSE](LICENSE), the same license as the
+IEEE 2030.5 server, core and client repositories. See [NOTICE](NOTICE) for
+third-party attributions. The Battelle Memorial Institute disclaimers are in
+LICENSE.
