@@ -1,0 +1,9 @@
+
+This project (gridappsd-go) is licensed under the terms in the LICENSE file at
+the root of this repository. This NOTICE covers third-party material the
+project incorporates or refers to.
+
+This repository does not vendor or fork third-party source, and it does not
+distribute or refer to IEEE 2030.5 material such as sep.xsd or sep_wadl.xml.
+The Go modules it depends on are not distributed with this repository and are
+governed by their own licenses; see go.mod and go.sum.
