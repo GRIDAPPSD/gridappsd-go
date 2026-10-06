@@ -17,6 +17,12 @@ tags.
   `names` subcommand that writes the model name list to a file. Credentials
   come from environment variables only.
 
+### Changed
+
+- Relicensed from BSD 2-Clause to the Battelle license used by the IEEE 2030.5
+  server, core and client repositories. `LICENSE.md` and `NOTICE.md` are now
+  `LICENSE` and `NOTICE`.
+
 ## [0.3.2] - 2026-09-30
 
 ### Fixed

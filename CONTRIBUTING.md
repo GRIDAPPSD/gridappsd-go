@@ -51,4 +51,4 @@ repository workflow.
 ## License
 
 By contributing, you agree that your contribution is licensed under the
-[BSD 2-Clause "Simplified" License](LICENSE.md) that covers this repository.
+terms in the [LICENSE](LICENSE) file that covers this repository.
