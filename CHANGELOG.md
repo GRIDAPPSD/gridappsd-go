@@ -13,9 +13,13 @@ tags.
 - `query.ModelNames` (#43): requests the model names on the model data
   destination and returns them, refusing an error reply, a reply that is not
   JSON, a reply with no data, and an empty list.
+- `query.ModelInfo` (#43): requests each model's name and mRID and returns
+  them exactly as stored, with the same refusals as `ModelNames` plus an
+  entry that lacks a name or an mRID.
 - The repository now ships a command, `cmd/gridappsd-model` (#43), with a
-  `names` subcommand that writes the model name list to a file. Credentials
-  come from environment variables only.
+  `names` subcommand that writes the model name list to a file, and an `info`
+  subcommand that prints each model's name and mRID.
+  Credentials come from environment variables only.
 
 ### Changed
 
