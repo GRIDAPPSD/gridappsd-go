@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -411,6 +412,34 @@ func TestConn_BoundedDisconnectIsGraceful(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Error("broker wrote no RECEIPT for DISCONNECT")
+	}
+}
+
+// TestConn_BoundedDisconnectLiveWindowIsHalfTheBound checks that a live
+// broker gets half the disconnect bound to answer, not the whole bound, and
+// that the error names that window and the bound rather than only the close.
+func TestConn_BoundedDisconnectLiveWindowIsHalfTheBound(t *testing.T) {
+	t.Parallel()
+	const (
+		bound = time.Second
+		delay = 700 * time.Millisecond
+	)
+	rwc := startFakeSTOMPServerOpts(t, fakeServerOpts{disconnectReceiptDelay: delay})
+	c, err := (&Dialer{}).WithDisconnectBound(bound).Dial(context.Background(), rwc, transport.ConnConfig{Login: "u", Passcode: "p"})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	start := time.Now()
+	err = c.Disconnect()
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("Disconnect = nil after %v, want an error: the %v receipt is later than half the %v bound", elapsed, delay, bound)
+	}
+	if want := "no receipt within 500ms, half the 1s bound"; !strings.Contains(err.Error(), want) {
+		t.Errorf("Disconnect error = %q, want it to contain %q", err, want)
+	}
+	if elapsed >= delay {
+		t.Errorf("Disconnect returned after %v, want before the broker's %v receipt", elapsed, delay)
 	}
 }
 

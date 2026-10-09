@@ -53,10 +53,12 @@ const (
 	maxStepErrLen = 512
 
 	// credentialDisconnectBound caps the credential connection's wait for its
-	// DISCONNECT receipt. A broker that is up answers in a round trip; a
-	// close that lands after the DISCONNECT is queued leaves a wait that
-	// cannot succeed, and callers check for leaked goroutines within seconds
-	// (#24). The token has already arrived, so giving up costs a log line.
+	// DISCONNECT receipt; a broker that keeps the connection open has half of
+	// it to answer (see stomp.Dialer.WithDisconnectBound). A broker that is up
+	// answers in a round trip; a close that lands after the DISCONNECT is
+	// queued leaves a wait that cannot succeed, and callers check for leaked
+	// goroutines within seconds (#24). The token has already arrived, so
+	// giving up costs a log line.
 	credentialDisconnectBound = time.Second
 )
 

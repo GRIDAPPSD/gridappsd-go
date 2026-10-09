@@ -36,13 +36,15 @@ type Dialer struct {
 	disconnectBound time.Duration
 }
 
-// WithDisconnectBound returns a Dialer whose connections give up waiting for
-// the DISCONNECT receipt after bound, instead of go-stomp's 30 s default. Halfway
-// through the wait the transport is closed, which ends the wait at once
-// while go-stomp's I/O loop still runs; the bound itself only ends a wait
-// whose loop has already exited (#24).
+// WithDisconnectBound returns a copy of d whose connections give up waiting
+// for the DISCONNECT receipt after bound, instead of go-stomp's 30 s default.
+// Halfway through the wait the transport is closed, which ends the wait at
+// once while go-stomp's I/O loop still runs, so a live broker has bound/2 to
+// answer; the full bound only ends a wait whose loop has already exited (#24).
 func (d *Dialer) WithDisconnectBound(bound time.Duration) transport.Dialer {
-	return &Dialer{disconnectBound: bound}
+	nd := *d
+	nd.disconnectBound = bound
+	return &nd
 }
 
 // resolveHeartBeat returns the outgoing and incoming heart-beat intervals to
@@ -111,7 +113,7 @@ func (d *Dialer) Dial(ctx context.Context, rwc io.ReadWriteCloser, cfg transport
 	if err != nil {
 		return nil, fmt.Errorf("stomp connect: %w", err)
 	}
-	return &conn{c: c, rwc: rwc, closeAfter: d.disconnectBound / 2}, nil
+	return &conn{c: c, rwc: rwc, bound: d.disconnectBound, closeAfter: d.disconnectBound / 2}, nil
 }
 
 // errDisconnected reports an Unsubscribe that began after Disconnect. The
@@ -129,10 +131,11 @@ var errDisconnected = errors.New("stomp unsubscribe: connection disconnected")
 // get a receipt after that (#24).
 //
 // closeAfter, when non-zero, is how long Disconnect waits for its receipt
-// before closing rwc; see Dialer.WithDisconnectBound.
+// before closing rwc, half of bound; see Dialer.WithDisconnectBound.
 type conn struct {
 	c          *gostomp.Conn
 	rwc        io.Closer
+	bound      time.Duration
 	closeAfter time.Duration
 
 	mu      sync.Mutex
@@ -191,18 +194,33 @@ func (c *conn) Disconnect() error {
 		}
 		return nil
 	}
+	var closed atomic.Bool
 	if c.closeAfter > 0 {
 		// Closing the transport while the receipt wait is still live lets
 		// go-stomp's I/O loop deliver its close error to that wait. Once
 		// go-stomp's own timeout gives up, the loop would block forever
 		// sending to the abandoned receipt channel (#24).
-		t := time.AfterFunc(c.closeAfter, func() { _ = c.rwc.Close() })
+		//
+		// INFERRED (#24): on a *tls.Conn, Close first sends close_notify
+		// under a 5 s write deadline unless a write is in flight, so a broker
+		// that stopped reading could delay the real close past the bound.
+		t := time.AfterFunc(c.closeAfter, func() {
+			closed.Store(true)
+			_ = c.rwc.Close()
+		})
 		defer t.Stop()
 	}
-	if err := c.c.Disconnect(); err != nil {
-		return fmt.Errorf("stomp disconnect: %w", err)
+	err := c.c.Disconnect()
+	switch {
+	case err == nil:
+		return nil
+	case c.bound > 0 && errors.Is(err, gostomp.ErrDisconnectReceiptTimeout):
+		return fmt.Errorf("stomp disconnect: no receipt within the %v bound: %w", c.bound, err)
+	case closed.Load():
+		return fmt.Errorf("stomp disconnect: no receipt within %v, half the %v bound, so the transport was closed: %w",
+			c.closeAfter, c.bound, err)
 	}
-	return nil
+	return fmt.Errorf("stomp disconnect: %w", err)
 }
 
 func (c *conn) markEnded() { c.ended.Store(true) }
