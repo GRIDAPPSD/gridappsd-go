@@ -3,6 +3,7 @@ package stomp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -604,5 +605,26 @@ func TestConn_SubscribeReturnsErrorAfterDisconnect(t *testing.T) {
 	// go-stomp marks the connection closed after Disconnect; Subscribe returns an error.
 	if _, err := c.Subscribe(context.Background(), "/queue/x"); err == nil {
 		t.Error("expected error when subscribing on closed conn, got nil")
+	}
+}
+
+// TestEndsConn checks which subscription errors mark the connection ended:
+// only an ERROR frame go-stomp delivered, which it sends as its I/O loop ends.
+func TestEndsConn(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"ERROR frame", &gostomp.Error{Message: "connection closed", Frame: frame.New(frame.ERROR, frame.Message, "connection closed")}, true},
+		{"wrapped ERROR frame", fmt.Errorf("sub: %w", &gostomp.Error{Frame: frame.New(frame.ERROR)}), true},
+		{"raised by Unsubscribe, no frame", &gostomp.Error{Message: "channel unsubscribe receipt timeout"}, false},
+		{"other error", errors.New("boom"), false},
+	}
+	for _, tc := range cases {
+		if got := endsConn(tc.err); got != tc.want {
+			t.Errorf("%s: endsConn = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

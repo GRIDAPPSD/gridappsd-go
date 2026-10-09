@@ -48,6 +48,10 @@ const (
 	// answered with an ERROR frame whose message header is oversizedErrLen
 	// bytes long.
 	brokerErrorOnDisconnect
+	// brokerCloseOnTokenRequest closes the credential connection as soon as
+	// it reads the token request, without a reply: the client sees the
+	// connection close while it waits for the token.
+	brokerCloseOnTokenRequest
 )
 
 // oversizedErrLen is the length of brokerErrorOnDisconnect's ERROR message.
@@ -181,7 +185,7 @@ func (b *stompBroker) serve(idx int, c net.Conn) {
 		case frame.SUBSCRIBE:
 			subIDs[f.Header.Get(frame.Destination)] = f.Header.Get(frame.Id)
 		case frame.SEND:
-			if replyTo, ok := f.Header.Contains("reply-to"); ok && b.mode != brokerSilent {
+			if replyTo, ok := f.Header.Contains("reply-to"); ok && b.mode != brokerSilent && b.mode != brokerCloseOnTokenRequest {
 				dest := "/queue/" + replyTo
 				n := 1
 				if b.mode == brokerFlood {
@@ -213,7 +217,7 @@ func (b *stompBroker) serve(idx int, c net.Conn) {
 				return
 			}
 		}
-		if b.mode == brokerCloseAfterToken && f.Command == frame.SEND {
+		if (b.mode == brokerCloseAfterToken || b.mode == brokerCloseOnTokenRequest) && f.Command == frame.SEND {
 			return
 		}
 	}

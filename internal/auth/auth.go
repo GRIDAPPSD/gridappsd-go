@@ -115,9 +115,10 @@ func Exchange(
 // Once ctx is done rwc is closed, also under a pending UNSUBSCRIBE or
 // DISCONNECT, so go-stomp ends the subscription and wakes both receipt waits
 // instead of waiting out its 30 s receipt timeout. go-stomp can miss that
-// wakeup or stall a Disconnect on a closed connection, keeping a goroutine
-// past the close (#24). A go-stomp v3.1.2 panic from a receipt timeout racing
-// that close is recovered by unsubscribe and reported like any other error.
+// wakeup, or stall a Disconnect whose connection closes under it, keeping a
+// goroutine past the close (#24). A go-stomp v3.1.2 panic from a receipt
+// timeout racing that close is recovered by unsubscribe and reported like any
+// other error.
 func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, sub transport.Subscription) (stepErr, ctxErr error) {
 	if sub != nil {
 		// The subscription's forwarding goroutine blocks once its buffer is

@@ -11,6 +11,7 @@ import (
 	"io"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gostomp "github.com/go-stomp/stomp/v3"
@@ -107,12 +108,18 @@ var errDisconnected = errors.New("stomp unsubscribe: connection disconnected")
 // go-stomp v3.1.2 can panic the process when its connection closes under an
 // Unsubscribe (#23), so Disconnect refuses new unsubscribes and waits for
 // pending ones before it closes anything.
+//
+// ended is set once a subscription has received go-stomp's ERROR frame, which
+// go-stomp sends as its I/O loop ends. go-stomp's graceful Disconnect cannot
+// get a receipt after that (#24).
 type conn struct {
 	c *gostomp.Conn
 
 	mu      sync.Mutex
 	closing bool
 	unsubs  sync.WaitGroup
+
+	ended atomic.Bool
 }
 
 // The "reply-to" key in headers sets the reply-to header on the SEND frame;
@@ -146,17 +153,29 @@ func (c *conn) Subscribe(ctx context.Context, destination string) (transport.Sub
 
 // Disconnect sends a STOMP DISCONNECT frame and closes the underlying connection.
 // Pending unsubscribes finish first; each is bounded by go-stomp's
-// unsubscribe receipt timeout.
+// unsubscribe receipt timeout. A connection that has already ended is closed
+// without a DISCONNECT frame.
 func (c *conn) Disconnect() error {
 	c.mu.Lock()
 	c.closing = true
 	c.mu.Unlock()
 	c.unsubs.Wait()
+	if c.ended.Load() {
+		// go-stomp v3.1.2's Disconnect would hold the close lock its ended I/O
+		// loop needs while it waits for the receipt that loop would have
+		// delivered, until its 30 s receipt timeout (#24).
+		if err := c.c.MustDisconnect(); err != nil {
+			return fmt.Errorf("stomp disconnect: %w", err)
+		}
+		return nil
+	}
 	if err := c.c.Disconnect(); err != nil {
 		return fmt.Errorf("stomp disconnect: %w", err)
 	}
 	return nil
 }
+
+func (c *conn) markEnded() { c.ended.Store(true) }
 
 // beginUnsubscribe registers a pending unsubscribe, or reports false once
 // Disconnect has begun.
@@ -172,10 +191,12 @@ func (c *conn) beginUnsubscribe() bool {
 
 func (c *conn) endUnsubscribe() { c.unsubs.Done() }
 
-// unsubGate orders unsubscribes against the connection's Disconnect.
+// unsubGate orders unsubscribes against the connection's Disconnect, and
+// takes the subscription's report that the connection has ended.
 type unsubGate interface {
 	beginUnsubscribe() bool
 	endUnsubscribe()
+	markEnded()
 }
 
 // goStompSub is the subset of *gostomp.Subscription used by the bridge.
@@ -275,6 +296,9 @@ func (s *sub) bridge(ctx context.Context) {
 			if !ok {
 				return
 			}
+			if endsConn(msg.Err) {
+				s.gate.markEnded()
+			}
 			if out == nil {
 				continue
 			}
@@ -305,4 +329,13 @@ func (s *sub) bridge(ctx context.Context) {
 			endOut()
 		}
 	}
+}
+
+// endsConn reports whether err is an ERROR frame go-stomp delivered to the
+// subscription. go-stomp sends one when its I/O loop ends, and on a broker
+// ERROR, after which it closes the connection. Errors raised by Unsubscribe
+// itself carry no frame.
+func endsConn(err error) bool {
+	var e *gostomp.Error
+	return errors.As(err, &e) && e.Frame != nil
 }
