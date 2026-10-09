@@ -104,7 +104,7 @@ func TestBridge_SourceCloseExits(t *testing.T) {
 // TestBridge_CtxCancelExitsGoroutine verifies exit path (a): ctx cancellation
 // unblocks a bridge goroutine that is stuck trying to send on a full output channel.
 //
-// Without the nested-select fix (finding 2), the goroutine blocks on the outbound
+// Without the bridge's nested select, the goroutine blocks on the outbound
 // send indefinitely and this test fails at the 500 ms timeout. A WaitGroup tracks
 // goroutine exit independently of s.ch so the test does not accidentally act as a
 // receiver and unblock the bridge's stuck send.
