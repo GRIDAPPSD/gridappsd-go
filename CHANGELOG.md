@@ -22,12 +22,12 @@ tags.
   - a connection whose subscription has already seen it end is closed without
     a DISCONNECT frame, instead of waiting for a receipt the ended connection
     cannot deliver;
-  - the credential connection waits at most 1 s for its DISCONNECT receipt,
-    which covers a close that lands after the DISCONNECT was queued. Halfway
-    through the wait the transport is closed, so a broker that keeps the
-    connection open and never answers ends the wait without leaving go-stomp's
-    I/O loop blocked. A token that already arrived is still used, and the
-    failure is logged.
+  - the credential connection's DISCONNECT receipt wait is bounded at 1 s,
+    which covers a close that lands after the DISCONNECT was queued. A broker
+    that keeps the connection open gets 0.5 s to answer: halfway through the
+    wait the transport is closed, so a broker that never answers ends the wait
+    without leaving go-stomp's I/O loop blocked. A token that already arrived
+    is still used, and the failure is logged with an error naming the bound.
 
 ### Known issues (not fixed in this release)
 
@@ -39,9 +39,13 @@ tags.
   - go-stomp's Unsubscribe can miss the wakeup from its receipt or from the
     connection closing, wait out its 30 s unsubscribe receipt timeout, and keep
     the waiting goroutine; the token exchange then fails at the caller's
-    deadline;
+    deadline when that is under 30 s, and otherwise takes those 30 s;
   - the durable connection's Disconnect keeps go-stomp's 30 s DISCONNECT
-    receipt timeout, so a broker close that lands while it waits stalls it.
+    receipt timeout, so a broker close that lands while it waits stalls it;
+  - over TLS, closing the credential connection first sends a close_notify
+    alert under a 5 s write deadline, so a broker that has stopped reading
+    could delay that close past the 1 s bound and leave go-stomp's I/O loop
+    blocked as above. This is inferred from the Go TLS source and not tested.
 - Other Unicode format (Cf) characters in teardown error text are still written
   as they arrive (#41).
 
