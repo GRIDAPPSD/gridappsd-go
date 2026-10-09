@@ -7,14 +7,16 @@
 A Go client library for GridAPPS-D / GOSS. It mirrors the connection and
 message-bus layer of the gridappsd-python client in idiomatic Go: connection
 and two-step token authentication, STOMP transport, publish/subscribe
-messaging, and correlated request/reply. The query API is not ported; see
-Status below.
+messaging, and correlated request/reply. The query API is only partly
+ported; see Status below.
 
 ## Status
 
 The connection, messaging, and transport layers described below are
-implemented and covered by tests. The typed CIM query API (the
-gridappsd-python `GridAPPSDClient` request helpers) is not yet ported; see
+implemented and covered by tests. Of the typed query API (the
+gridappsd-python `GridAPPSDClient` request helpers), only `query.ModelNames`
+is ported so far, and the `gridappsd-model` command ships with a `names`
+subcommand over it. The rest is not yet ported; see
 [CHANGELOG.md](CHANGELOG.md) for what has shipped so far.
 
 ## Installation
@@ -190,11 +192,31 @@ answers would block forever; bound it as shown above.
 - `fieldbus`: `MessageBus`, the publish/subscribe and request/reply
   abstraction built on `gridappsd.Connect`.
 - `message`: STOMP frame header name constants used by the GOSS protocol.
+- `query`: typed requests on the model data destination. `ModelNames`
+  returns the names of the models the platform holds.
 - `topics`: destination-naming helpers and well-known GridAPPS-D topic
   constants.
 - `transport`: the STOMP connection interfaces (`Conn`, `Subscription`,
   `Dialer`) that `fieldbus` and `gridappsd` are built on. The concrete
   implementation is internal; tests and examples use in-process fakes.
+
+## Command
+
+`cmd/gridappsd-model` is a command over the `query` package:
+
+```sh
+go run github.com/GRIDAPPSD/gridappsd-go/cmd/gridappsd-model@latest names \
+    --address localhost:61613 --allow-plaintext --out model-names.txt
+```
+
+`names` writes a list file (a `# feeder-list v1` header, a `# source:` line
+naming the broker address, the request and the query time in UTC, then one
+lower-cased name per line, sorted and unique). When `--out` already exists
+its names are kept and the new ones added; a failed or empty reply writes
+nothing and exits non-zero. Credentials are read only from the environment
+variables named by `--user-env` and `--password-env` (default
+`GRIDAPPSD_USER` and `GRIDAPPSD_PASSWORD`); there is no credential flag.
+`--allow-plaintext` and `--ca-file` select the transport as in `Config`.
 
 Runnable examples for the packages above are in each package's
 `example_test.go` and render on
