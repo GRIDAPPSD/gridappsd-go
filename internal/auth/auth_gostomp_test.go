@@ -55,7 +55,15 @@ const (
 	// brokerNoCredentialDisconnectReceipt is brokerNoDisconnectReceipt on the
 	// credential connection only; the durable leg is answered.
 	brokerNoCredentialDisconnectReceipt
+	// brokerSlowDurableDisconnectReceipt is brokerAnswering except that the
+	// durable connection's DISCONNECT receipt is written after
+	// slowReceiptDelay.
+	brokerSlowDurableDisconnectReceipt
 )
+
+// slowReceiptDelay is how late brokerSlowDurableDisconnectReceipt answers the
+// durable DISCONNECT: past the credential connection's 1 s bound.
+const slowReceiptDelay = 1500 * time.Millisecond
 
 // oversizedErrLen is the length of brokerErrorOnDisconnect's ERROR message.
 const oversizedErrLen = 4 << 20
@@ -213,6 +221,9 @@ func (b *stompBroker) serve(idx int, c net.Conn) {
 			!(b.mode == brokerNoDisconnectReceipt && f.Command == frame.DISCONNECT) &&
 			!(b.mode == brokerNoCredentialDisconnectReceipt && idx == 0 && f.Command == frame.DISCONNECT) &&
 			!(b.mode == brokerNoUnsubscribeReceipt && f.Command == frame.UNSUBSCRIBE)
+		if ok && answer && b.mode == brokerSlowDurableDisconnectReceipt && idx == 1 && f.Command == frame.DISCONNECT {
+			time.Sleep(slowReceiptDelay)
+		}
 		if ok && answer {
 			out = append(out, frame.New(frame.RECEIPT, frame.ReceiptId, receipt))
 		}

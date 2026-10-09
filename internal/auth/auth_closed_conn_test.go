@@ -3,6 +3,8 @@ package auth_test
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"runtime"
@@ -33,17 +35,20 @@ const (
 )
 
 // stalledIn names the go-stomp wait a stalled teardown is parked in, read from
-// the stacks of every goroutine.
-func stalledIn() string {
-	stacks := allStacks()
-	switch {
-	case strings.Contains(stacks, "stomp/v3.(*Conn).Disconnect"):
-		return disconnectWait
-	case strings.Contains(stacks, "stomp/v3.waitWithTimeout"):
-		return unsubscribeWait
-	default:
-		return "unidentified wait"
+// the stacks of the goroutines that attempt started. A goroutine left parked
+// by an earlier attempt says nothing about this one.
+func stalledIn(fresh map[string]string) string {
+	var inUnsubscribe bool
+	for _, g := range fresh {
+		if strings.Contains(g, "stomp/v3.(*Conn).Disconnect") {
+			return disconnectWait
+		}
+		inUnsubscribe = inUnsubscribe || strings.Contains(g, "stomp/v3.waitWithTimeout")
 	}
+	if inUnsubscribe {
+		return unsubscribeWait
+	}
+	return "unidentified wait"
 }
 
 // stompGoroutines returns the stack of each goroutine running go-stomp, or
@@ -62,18 +67,29 @@ func stompGoroutines() map[string]string {
 	return out
 }
 
+// newStompGoroutines returns the goroutines stompGoroutines reports that are
+// not in base.
+func newStompGoroutines(base map[string]string) map[string]string {
+	out := map[string]string{}
+	for id, g := range stompGoroutines() {
+		if _, old := base[id]; !old {
+			out[id] = g
+		}
+	}
+	return out
+}
+
 // waitNoNewStompGoroutines fails the test unless every goroutine that
-// stompGoroutines reports, and that was not in base, has exited within d.
-// Comparing ids rather than counts keeps a goroutine an earlier test left
-// parked, and that exits meanwhile, from hiding a new one. ignore, when
-// non-nil, excludes the goroutines it reports true for.
-func waitNoNewStompGoroutines(t *testing.T, base map[string]string, d time.Duration, ignore func(stack string) bool) {
+// stompGoroutines reports, and that was not in base or ignore, has exited
+// within d. Comparing ids rather than counts keeps a goroutine an earlier test
+// left parked, and that exits meanwhile, from hiding a new one.
+func waitNoNewStompGoroutines(t *testing.T, base map[string]string, d time.Duration, ignore map[string]bool) {
 	t.Helper()
 	deadline := time.Now().Add(d)
 	for {
 		var left []string
-		for id, g := range stompGoroutines() {
-			if _, old := base[id]; !old && (ignore == nil || !ignore(g)) {
+		for id, g := range newStompGoroutines(base) {
+			if !ignore[id] {
 				left = append(left, g)
 			}
 		}
@@ -109,6 +125,7 @@ func TestExchange_BrokerClosingOnTokenRequestDoesNotStallTeardown(t *testing.T) 
 
 	stalls := map[string]int{}
 	for i := 0; i < attempts; i++ {
+		before := stompGoroutines()
 		ctx, cancel := context.WithTimeout(context.Background(), budget)
 		start := time.Now()
 		conn, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{}, logger)
@@ -124,7 +141,7 @@ func TestExchange_BrokerClosingOnTokenRequestDoesNotStallTeardown(t *testing.T) 
 		// The exchange already failed, so a teardown cut short by the deadline
 		// keeps the subscription error; only the time shows the stall.
 		if elapsed > stallBound {
-			stalls[stalledIn()]++
+			stalls[stalledIn(newStompGoroutines(before))]++
 		}
 	}
 	if len(stalls) > 0 {
@@ -141,28 +158,49 @@ func TestExchange_BrokerClosingOnTokenRequestDoesNotStallTeardown(t *testing.T) 
 //
 // The same close can also land as go-stomp's Unsubscribe starts waiting, and
 // go-stomp v3.1.2 then misses the wakeup, waits out its 30 s unsubscribe
-// receipt timeout and keeps the waiting goroutine for good (#24). That wait is
-// counted and logged here, and its goroutines are left out of the leak check.
+// receipt timeout and keeps the waiting goroutine for good (#24). Only an
+// attempt that fails at the deadline with a new goroutine parked in that wait
+// is set aside as this case, at most maxMissed times, and only those
+// goroutines are left out of the leak check.
 func TestExchange_BrokerClosingAfterTokenDoesNotStallDisconnect(t *testing.T) {
 	const (
 		attempts   = 50
 		budget     = 2 * time.Second
 		stallBound = 1500 * time.Millisecond
 		settle     = 2 * time.Second
+		// maxMissed is four times the lost wakeup's measured rate of about 2
+		// in 50 attempts, so a change that makes it common still fails.
+		maxMissed = 8
 	)
 	b := startStompBroker(t, brokerCloseAfterToken)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	base := stompGoroutines()
 
 	stalls, failed := map[string]int{}, map[string]int{}
+	missed, parked := 0, map[string]bool{}
 	for i := 0; i < attempts; i++ {
+		before := stompGoroutines()
 		ctx, cancel := context.WithTimeout(context.Background(), budget)
 		start := time.Now()
 		conn, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{}, logger)
 		elapsed := time.Since(start)
 		cancel()
 		if elapsed > stallBound {
-			stalls[stalledIn()]++
+			fresh := newStompGoroutines(before)
+			wait := stalledIn(fresh)
+			if wait == unsubscribeWait && errors.Is(err, context.DeadlineExceeded) {
+				missed++
+				for id, g := range fresh {
+					if strings.Contains(g, "stomp/v3.waitWithTimeout") {
+						parked[id] = true
+					}
+				}
+				continue
+			}
+			stalls[fmt.Sprintf("%s, err %v", wait, err)]++
+			if err == nil {
+				_ = conn.Disconnect()
+			}
 			continue
 		}
 		if err != nil {
@@ -173,28 +211,26 @@ func TestExchange_BrokerClosingAfterTokenDoesNotStallDisconnect(t *testing.T) {
 			t.Errorf("attempt %d: durable Disconnect: %v", i, err)
 		}
 	}
-	missed := stalls[unsubscribeWait]
-	delete(stalls, unsubscribeWait)
 	if len(stalls) > 0 || len(failed) > 0 {
 		t.Errorf("%d attempts: teardown took over %v, by wait: %v; failed exchanges: %v", attempts, stallBound, stalls, failed)
 	}
-	if missed > 0 {
-		t.Logf("%d of %d teardowns parked in the %s (#24)", missed, attempts, unsubscribeWait)
+	t.Logf("%d of %d teardowns parked in the %s (#24), at most %d allowed", missed, attempts, unsubscribeWait, maxMissed)
+	if missed > maxMissed {
+		t.Errorf("%d of %d teardowns parked in the %s, want at most %d", missed, attempts, unsubscribeWait, maxMissed)
 	}
-	waitNoNewStompGoroutines(t, base, settle, func(stack string) bool {
-		return strings.Contains(stack, "stomp/v3.waitWithTimeout")
-	})
+	waitNoNewStompGoroutines(t, base, settle, parked)
 }
 
 // TestExchange_UnansweredDisconnectBoundedWithoutLeak runs the real stack
 // against a broker that hands out the token and then never answers
 // DISCONNECT, under a caller deadline longer than the receipt bound. The bound
 // must end the teardown, keep the token, log the failure, and leave go-stomp's
-// I/O loop no abandoned receipt channel to block on.
+// I/O loop no abandoned receipt channel to block on. With the I/O loop alive,
+// the transport close at half the 1 s bound is what ends the wait.
 func TestExchange_UnansweredDisconnectBoundedWithoutLeak(t *testing.T) {
 	const (
 		budget = 10 * time.Second
-		within = 2 * time.Second
+		within = 800 * time.Millisecond
 		settle = 2 * time.Second
 	)
 	b := startStompBroker(t, brokerNoCredentialDisconnectReceipt)
@@ -219,8 +255,33 @@ func TestExchange_UnansweredDisconnectBoundedWithoutLeak(t *testing.T) {
 	if got := b.commands(0); len(got) == 0 || got[len(got)-1] != "DISCONNECT" {
 		t.Errorf("credential leg frames = %v, want the last one DISCONNECT", got)
 	}
-	if !strings.Contains(logs.String(), "credential connection teardown failed") {
-		t.Errorf("log = %q, want the teardown failure", logs.String())
+	if !strings.Contains(logs.String(), "credential connection teardown failed") ||
+		!strings.Contains(logs.String(), "half the 1s bound") {
+		t.Errorf("log = %q, want the teardown failure naming the bound", logs.String())
 	}
 	waitNoNewStompGoroutines(t, base, settle, nil)
+}
+
+// TestExchange_DurableDisconnectKeepsDefaultReceiptWait checks that the
+// credential connection's disconnect bound does not reach the durable
+// connection: a durable DISCONNECT answered after that bound still ends on the
+// broker's RECEIPT, with no error.
+func TestExchange_DurableDisconnectKeepsDefaultReceiptWait(t *testing.T) {
+	b := startStompBroker(t, brokerSlowDurableDisconnectReceipt)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{}, nil)
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	start := time.Now()
+	if err := conn.Disconnect(); err != nil {
+		t.Fatalf("durable Disconnect after %v: %v, want nil from the broker's late RECEIPT", time.Since(start), err)
+	}
+	if elapsed := time.Since(start); elapsed < slowReceiptDelay {
+		t.Errorf("durable Disconnect returned after %v, before the broker's %v receipt delay", elapsed, slowReceiptDelay)
+	}
+	if got := b.commands(1); len(got) == 0 || got[len(got)-1] != "DISCONNECT" {
+		t.Errorf("durable leg frames = %v, want the last one DISCONNECT", got)
+	}
 }
