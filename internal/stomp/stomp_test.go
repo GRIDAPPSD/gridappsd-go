@@ -257,6 +257,13 @@ type fakeServerOpts struct {
 	// delivers on SUBSCRIBE. Heart-beat tests need a broker that says nothing
 	// after CONNECTED, because any received frame resets go-stomp's read timer.
 	quietOnSubscribe bool
+
+	// disconnectReceiptDelay delays the broker's DISCONNECT receipt.
+	disconnectReceiptDelay time.Duration
+
+	// disconnectReceipt, when non-nil, receives the receipt id the broker
+	// answered DISCONNECT with, once the RECEIPT is written. Must be buffered.
+	disconnectReceipt chan<- string
 }
 
 // startFakeSTOMPServer starts a goroutine serving a minimal STOMP protocol
@@ -340,7 +347,10 @@ func startFakeSTOMPServerOpts(t *testing.T, opts fakeServerOpts) *pipeRWC {
 				}
 			case frame.DISCONNECT:
 				if id, ok := f.Header.Contains(frame.Receipt); ok {
-					_ = w.Write(frame.New(frame.RECEIPT, frame.ReceiptId, id))
+					time.Sleep(opts.disconnectReceiptDelay)
+					if err := w.Write(frame.New(frame.RECEIPT, frame.ReceiptId, id)); err == nil && opts.disconnectReceipt != nil {
+						opts.disconnectReceipt <- id
+					}
 				}
 				return
 			}
@@ -371,6 +381,36 @@ func TestDial_ConnectsSuccessfully(t *testing.T) {
 	}
 	if err := c.Disconnect(); err != nil {
 		t.Errorf("Disconnect: %v", err)
+	}
+}
+
+// TestConn_BoundedDisconnectIsGraceful checks that a disconnect bound only
+// limits a wait that cannot succeed: a broker that answers DISCONNECT inside
+// the bound, here after a delay, gets the DISCONNECT and its RECEIPT is what
+// ends Disconnect, with no error.
+func TestConn_BoundedDisconnectIsGraceful(t *testing.T) {
+	t.Parallel()
+	const delay = 200 * time.Millisecond
+	receipts := make(chan string, 1)
+	rwc := startFakeSTOMPServerOpts(t, fakeServerOpts{disconnectReceiptDelay: delay, disconnectReceipt: receipts})
+	c, err := (&Dialer{}).WithDisconnectBound(time.Second).Dial(context.Background(), rwc, transport.ConnConfig{Login: "u", Passcode: "p"})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	start := time.Now()
+	if err := c.Disconnect(); err != nil {
+		t.Fatalf("Disconnect: %v, want nil from the broker's RECEIPT", err)
+	}
+	if elapsed := time.Since(start); elapsed < delay {
+		t.Errorf("Disconnect returned after %v, before the broker's %v receipt delay", elapsed, delay)
+	}
+	select {
+	case id := <-receipts:
+		if id == "" {
+			t.Error("broker answered DISCONNECT with an empty receipt id")
+		}
+	case <-time.After(time.Second):
+		t.Error("broker wrote no RECEIPT for DISCONNECT")
 	}
 }
 

@@ -12,11 +12,12 @@
 //  4. Read the token from the subscription channel, bounded by ctx.
 //  5. End the first connection. (goss.py leaks this connection; we do not.)
 //     While ctx is live this is UNSUBSCRIBE then DISCONNECT, each waiting for
-//     its receipt. Once ctx is done the transport is closed, which ends a
-//     pending receipt wait in the common case; go-stomp can still keep a
-//     goroutine past it (#24). A ctx that ends during the teardown fails an
-//     exchange that had a token. A failed teardown step is otherwise logged
-//     and the connection closed, and a token that arrived is still used.
+//     its receipt, the DISCONNECT receipt for at most credentialDisconnectBound.
+//     Once ctx is done the transport is closed, which ends a pending receipt
+//     wait in the common case; go-stomp can still keep a goroutine past it
+//     (#24). A ctx that ends during the teardown fails an exchange that had
+//     a token. A failed teardown step is otherwise logged and the connection
+//     closed, and a token that arrived is still used.
 //  6. Open a SECOND STOMP connection: token as login, empty passcode.
 //
 // Re-auth: Exchange is stateless and re-entrant. Call it again with fresh
@@ -50,7 +51,20 @@ const (
 	// maxStepErrLen caps the text of a teardown error. A broker's ERROR
 	// message reaches it whole, and go-stomp puts no limit on header size.
 	maxStepErrLen = 512
+
+	// credentialDisconnectBound caps the credential connection's wait for its
+	// DISCONNECT receipt. A broker that is up answers in a round trip; a
+	// close that lands after the DISCONNECT is queued leaves a wait that
+	// cannot succeed, and callers check for leaked goroutines within seconds
+	// (#24). The token has already arrived, so giving up costs a log line.
+	credentialDisconnectBound = time.Second
 )
+
+// disconnectBounder is a transport.Dialer that can bound its connections'
+// wait for a DISCONNECT receipt.
+type disconnectBounder interface {
+	WithDisconnectBound(bound time.Duration) transport.Dialer
+}
 
 // NetDialer dials a raw network connection that the caller has already wrapped
 // with TLS. It is called twice: once for the credential leg, once for the
@@ -115,8 +129,9 @@ func Exchange(
 // Once ctx is done rwc is closed, also under a pending UNSUBSCRIBE or
 // DISCONNECT, so go-stomp ends the subscription and wakes both receipt waits
 // instead of waiting out its 30 s receipt timeout. go-stomp can miss that
-// wakeup, or stall a Disconnect whose connection closes under it, keeping a
-// goroutine past the close (#24). A go-stomp v3.1.2 panic from a receipt
+// wakeup in Unsubscribe, keeping a goroutine past the close (#24); a
+// Disconnect whose connection closes under it waits out
+// credentialDisconnectBound. A go-stomp v3.1.2 panic from a receipt
 // timeout racing that close is recovered by unsubscribe and reported like any
 // other error.
 func endCredentialConn(ctx context.Context, rwc io.Closer, conn transport.Conn, sub transport.Subscription) (stepErr, ctxErr error) {
@@ -292,6 +307,9 @@ func fetchToken(
 	rwc1, err := netDial(ctx)
 	if err != nil {
 		return "", fmt.Errorf("credential dial: %w", err)
+	}
+	if b, ok := d.(disconnectBounder); ok {
+		d = b.WithDisconnectBound(credentialDisconnectBound)
 	}
 	conn1, err := d.Dial(ctx, rwc1, transport.ConnConfig{
 		Login:      user,
