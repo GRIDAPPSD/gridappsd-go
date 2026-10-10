@@ -8,6 +8,8 @@ tags.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-09
+
 ### Changed
 
 - Relicensed from BSD 2-Clause to the Battelle license used by the IEEE 2030.5
@@ -27,7 +29,8 @@ tags.
     that keeps the connection open gets 0.5 s to answer: halfway through the
     wait the transport is closed, so a broker that never answers ends the wait
     without leaving go-stomp's I/O loop blocked. A token that already arrived
-    is still used, and the failure is logged with an error naming the bound.
+    is still used unless the caller's context ends during the teardown, which
+    fails the exchange. Otherwise a teardown failure is logged as a warning.
 
 ### Known issues (not fixed in this release)
 
@@ -253,7 +256,8 @@ Seeded from `.github/release-notes/v0.1.0.md`.
 - A third defect was in `go-stomp` itself and is third-party; not tracked in
   this repository. Still present; see [0.2.0] "Known issues".
 
-[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.2...main
+[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.3...main
+[0.3.3]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.2.1...v0.3.0
