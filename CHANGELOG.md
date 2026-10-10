@@ -29,7 +29,8 @@ tags.
     that keeps the connection open gets 0.5 s to answer: halfway through the
     wait the transport is closed, so a broker that never answers ends the wait
     without leaving go-stomp's I/O loop blocked. A token that already arrived
-    is still used, and the failure is logged with an error naming the bound.
+    is still used unless the caller's context ends during the teardown, which
+    fails the exchange. Otherwise a teardown failure is logged as a warning.
 
 ### Known issues (not fixed in this release)
 
