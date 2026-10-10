@@ -52,7 +52,18 @@ const (
 	// it reads the token request, without a reply: the client sees the
 	// connection close while it waits for the token.
 	brokerCloseOnTokenRequest
+	// brokerNoCredentialDisconnectReceipt is brokerNoDisconnectReceipt on the
+	// credential connection only; the durable leg is answered.
+	brokerNoCredentialDisconnectReceipt
+	// brokerSlowDurableDisconnectReceipt is brokerAnswering except that the
+	// durable connection's DISCONNECT receipt is written after
+	// slowReceiptDelay.
+	brokerSlowDurableDisconnectReceipt
 )
+
+// slowReceiptDelay is how late brokerSlowDurableDisconnectReceipt answers the
+// durable DISCONNECT: past the credential connection's 1 s bound.
+const slowReceiptDelay = 1500 * time.Millisecond
 
 // oversizedErrLen is the length of brokerErrorOnDisconnect's ERROR message.
 const oversizedErrLen = 4 << 20
@@ -208,7 +219,11 @@ func (b *stompBroker) serve(idx int, c net.Conn) {
 		answer := b.mode != brokerSilent &&
 			!(b.mode == brokerErrorOnDisconnect && f.Command == frame.DISCONNECT) &&
 			!(b.mode == brokerNoDisconnectReceipt && f.Command == frame.DISCONNECT) &&
+			!(b.mode == brokerNoCredentialDisconnectReceipt && idx == 0 && f.Command == frame.DISCONNECT) &&
 			!(b.mode == brokerNoUnsubscribeReceipt && f.Command == frame.UNSUBSCRIBE)
+		if ok && answer && b.mode == brokerSlowDurableDisconnectReceipt && idx == 1 && f.Command == frame.DISCONNECT {
+			time.Sleep(slowReceiptDelay)
+		}
 		if ok && answer {
 			out = append(out, frame.New(frame.RECEIPT, frame.ReceiptId, receipt))
 		}
@@ -278,16 +293,21 @@ func TestExchange_SilentBrokerRetryLoopKeepsGoroutinesBounded(t *testing.T) {
 
 // TestExchange_AnsweringBrokerFrameOrder checks, on the wire of the real
 // go-stomp stack, the frames each leg sends and that the credential leg ends
-// with UNSUBSCRIBE then DISCONNECT while the caller's deadline is live.
+// with UNSUBSCRIBE then DISCONNECT while the caller's deadline is live, each
+// answered, so no teardown failure is logged.
 func TestExchange_AnsweringBrokerFrameOrder(t *testing.T) {
 	b := startStompBroker(t, brokerAnswering)
 	before := runtime.NumGoroutine()
+	h := &recordingHandler{}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{}, nil)
+	conn, err := auth.Exchange(ctx, b.dial, &stomp.Dialer{}, "u", "p", 0, &transport.HeartBeatIntervals{}, slog.New(h))
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
+	}
+	if recs := h.snapshot(); len(recs) != 0 {
+		t.Errorf("credential teardown logged %d records, want none: %v", len(recs), recs[0].text())
 	}
 	if err := conn.Disconnect(); err != nil {
 		t.Fatalf("durable Disconnect: %v", err)

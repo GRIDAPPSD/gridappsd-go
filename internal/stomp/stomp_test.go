@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -104,7 +105,7 @@ func TestBridge_SourceCloseExits(t *testing.T) {
 // TestBridge_CtxCancelExitsGoroutine verifies exit path (a): ctx cancellation
 // unblocks a bridge goroutine that is stuck trying to send on a full output channel.
 //
-// Without the nested-select fix (finding 2), the goroutine blocks on the outbound
+// Without the bridge's nested select, the goroutine blocks on the outbound
 // send indefinitely and this test fails at the 500 ms timeout. A WaitGroup tracks
 // goroutine exit independently of s.ch so the test does not accidentally act as a
 // receiver and unblock the bridge's stuck send.
@@ -257,6 +258,13 @@ type fakeServerOpts struct {
 	// delivers on SUBSCRIBE. Heart-beat tests need a broker that says nothing
 	// after CONNECTED, because any received frame resets go-stomp's read timer.
 	quietOnSubscribe bool
+
+	// disconnectReceiptDelay delays the broker's DISCONNECT receipt.
+	disconnectReceiptDelay time.Duration
+
+	// disconnectReceipt, when non-nil, receives the receipt id the broker
+	// answered DISCONNECT with, once the RECEIPT is written. Must be buffered.
+	disconnectReceipt chan<- string
 }
 
 // startFakeSTOMPServer starts a goroutine serving a minimal STOMP protocol
@@ -340,7 +348,10 @@ func startFakeSTOMPServerOpts(t *testing.T, opts fakeServerOpts) *pipeRWC {
 				}
 			case frame.DISCONNECT:
 				if id, ok := f.Header.Contains(frame.Receipt); ok {
-					_ = w.Write(frame.New(frame.RECEIPT, frame.ReceiptId, id))
+					time.Sleep(opts.disconnectReceiptDelay)
+					if err := w.Write(frame.New(frame.RECEIPT, frame.ReceiptId, id)); err == nil && opts.disconnectReceipt != nil {
+						opts.disconnectReceipt <- id
+					}
 				}
 				return
 			}
@@ -371,6 +382,64 @@ func TestDial_ConnectsSuccessfully(t *testing.T) {
 	}
 	if err := c.Disconnect(); err != nil {
 		t.Errorf("Disconnect: %v", err)
+	}
+}
+
+// TestConn_BoundedDisconnectIsGraceful checks that a disconnect bound only
+// limits a wait that cannot succeed: a broker that answers DISCONNECT inside
+// the bound, here after a delay, gets the DISCONNECT and its RECEIPT is what
+// ends Disconnect, with no error.
+func TestConn_BoundedDisconnectIsGraceful(t *testing.T) {
+	t.Parallel()
+	const delay = 200 * time.Millisecond
+	receipts := make(chan string, 1)
+	rwc := startFakeSTOMPServerOpts(t, fakeServerOpts{disconnectReceiptDelay: delay, disconnectReceipt: receipts})
+	c, err := (&Dialer{}).WithDisconnectBound(time.Second).Dial(context.Background(), rwc, transport.ConnConfig{Login: "u", Passcode: "p"})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	start := time.Now()
+	if err := c.Disconnect(); err != nil {
+		t.Fatalf("Disconnect: %v, want nil from the broker's RECEIPT", err)
+	}
+	if elapsed := time.Since(start); elapsed < delay {
+		t.Errorf("Disconnect returned after %v, before the broker's %v receipt delay", elapsed, delay)
+	}
+	select {
+	case id := <-receipts:
+		if id == "" {
+			t.Error("broker answered DISCONNECT with an empty receipt id")
+		}
+	case <-time.After(time.Second):
+		t.Error("broker wrote no RECEIPT for DISCONNECT")
+	}
+}
+
+// TestConn_BoundedDisconnectLiveWindowIsHalfTheBound checks that a live
+// broker gets half the disconnect bound to answer, not the whole bound, and
+// that the error names that window and the bound rather than only the close.
+func TestConn_BoundedDisconnectLiveWindowIsHalfTheBound(t *testing.T) {
+	t.Parallel()
+	const (
+		bound = time.Second
+		delay = 700 * time.Millisecond
+	)
+	rwc := startFakeSTOMPServerOpts(t, fakeServerOpts{disconnectReceiptDelay: delay})
+	c, err := (&Dialer{}).WithDisconnectBound(bound).Dial(context.Background(), rwc, transport.ConnConfig{Login: "u", Passcode: "p"})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	start := time.Now()
+	err = c.Disconnect()
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("Disconnect = nil after %v, want an error: the %v receipt is later than half the %v bound", elapsed, delay, bound)
+	}
+	if want := "no receipt within 500ms, half the 1s bound"; !strings.Contains(err.Error(), want) {
+		t.Errorf("Disconnect error = %q, want it to contain %q", err, want)
+	}
+	if elapsed >= delay {
+		t.Errorf("Disconnect returned after %v, want before the broker's %v receipt", elapsed, delay)
 	}
 }
 

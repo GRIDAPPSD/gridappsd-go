@@ -14,6 +14,41 @@ tags.
   server, core and client repositories. `LICENSE.md` and `NOTICE.md` are now
   `LICENSE` and `NOTICE`.
 
+### Fixed
+
+- The token exchange's credential connection teardown no longer waits out
+  go-stomp's 30 s DISCONNECT receipt timeout when the broker closes the
+  connection (#24):
+  - a connection whose subscription has already seen it end is closed without
+    a DISCONNECT frame, instead of waiting for a receipt the ended connection
+    cannot deliver;
+  - the credential connection's DISCONNECT receipt wait is bounded at 1 s,
+    which covers a close that lands after the DISCONNECT was queued. A broker
+    that keeps the connection open gets 0.5 s to answer: halfway through the
+    wait the transport is closed, so a broker that never answers ends the wait
+    without leaving go-stomp's I/O loop blocked. A token that already arrived
+    is still used, and the failure is logged with an error naming the bound.
+
+### Known issues (not fixed in this release)
+
+- go-stomp v3.1.2 can still keep a goroutine past the close of a connection
+  (#24):
+  - a receipt wait that times out leaves its channel registered, and go-stomp's
+    I/O loop blocks for good sending to it when the connection later closes, as
+    against a broker that keeps heart-beating but answers no receipts;
+  - go-stomp's Unsubscribe can miss the wakeup from its receipt or from the
+    connection closing, wait out its 30 s unsubscribe receipt timeout, and keep
+    the waiting goroutine; the token exchange then fails at the caller's
+    deadline when that is under 30 s, and otherwise takes those 30 s;
+  - the durable connection's Disconnect keeps go-stomp's 30 s DISCONNECT
+    receipt timeout, so a broker close that lands while it waits stalls it;
+  - over TLS, closing the credential connection first sends a close_notify
+    alert under a 5 s write deadline, so a broker that has stopped reading
+    could delay that close past the 1 s bound and leave go-stomp's I/O loop
+    blocked as above. This is inferred from the Go TLS source and not tested.
+- Other Unicode format (Cf) characters in teardown error text are still written
+  as they arrive (#41).
+
 ## [0.3.2] - 2026-09-30
 
 ### Fixed
