@@ -8,6 +8,8 @@ tags.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-15
+
 ### Added
 
 - `transport.Msg.Destination`, the destination header of the MESSAGE frame
@@ -262,7 +264,8 @@ Seeded from `.github/release-notes/v0.1.0.md`.
 - A third defect was in `go-stomp` itself and is third-party; not tracked in
   this repository. Still present; see [0.2.0] "Known issues".
 
-[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.3...main
+[Unreleased]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.4.0...main
+[0.4.0]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/GRIDAPPSD/gridappsd-go/compare/v0.3.0...v0.3.1
