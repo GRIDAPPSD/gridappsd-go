@@ -13,8 +13,14 @@ tags.
 ### Added
 
 - `transport.Msg.Destination`, the destination header of the MESSAGE frame
-  that carried the body, so a wildcard subscription can tell which concrete
-  destination a message was sent to. It is empty when `Err` is set (#52).
+  that carried the body, as set by the broker. On a wildcard subscription it is
+  normally the concrete destination the message was sent to. It is empty when
+  `Err` is set (#52).
+
+### Known issues (not fixed in this release)
+
+- Open issues #24 and #41 are unfixed here. Details are in the v0.4.0 release
+  notes under "Known issues (unfixed)".
 
 ## [0.3.3] - 2026-10-09
 
