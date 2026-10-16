@@ -83,6 +83,36 @@ func TestBridge_ForwardsMessages(t *testing.T) {
 	}
 }
 
+// TestBridge_ForwardsDestinations verifies that each message keeps the
+// destination of its own frame and that an error message carries none.
+func TestBridge_ForwardsDestinations(t *testing.T) {
+	t.Parallel()
+	f := &fakeStompSub{ch: make(chan *gostomp.Message, 3)}
+	s := newBridgeSub(context.Background(), f, subChanBuf)
+
+	f.ch <- &gostomp.Message{Body: []byte("a"), Destination: "/topic/x.one"}
+	f.ch <- &gostomp.Message{Body: []byte("b"), Destination: "/topic/x.two"}
+	f.ch <- &gostomp.Message{Err: errors.New("broker error"), Destination: "/topic/x.three"}
+
+	for i, want := range []struct{ body, dest string }{{"a", "/topic/x.one"}, {"b", "/topic/x.two"}} {
+		m := <-s.ch
+		if m.Err != nil {
+			t.Fatalf("message %d: unexpected error %v", i, m.Err)
+		}
+		if string(m.Body) != want.body || m.Destination != want.dest {
+			t.Errorf("message %d: want (%q, %q), got (%q, %q)", i, want.body, want.dest, m.Body, m.Destination)
+		}
+	}
+	m := <-s.ch
+	if m.Err == nil {
+		t.Fatal("third message: want an error message")
+	}
+	if m.Destination != "" {
+		t.Errorf("error message Destination: want empty, got %q", m.Destination)
+	}
+	close(f.ch)
+}
+
 // TestBridge_SourceCloseExits verifies exit path (b): when the go-stomp source
 // channel closes, the bridge exits and closes the output channel.
 func TestBridge_SourceCloseExits(t *testing.T) {
@@ -259,6 +289,11 @@ type fakeServerOpts struct {
 	// after CONNECTED, because any received frame resets go-stomp's read timer.
 	quietOnSubscribe bool
 
+	// messageDestination, when non-empty, is the destination header of the
+	// canned MESSAGE instead of the subscribed destination, as a broker
+	// delivering a wildcard subscription names the concrete destination.
+	messageDestination string
+
 	// disconnectReceiptDelay delays the broker's DISCONNECT receipt.
 	disconnectReceiptDelay time.Duration
 
@@ -335,6 +370,9 @@ func startFakeSTOMPServerOpts(t *testing.T, opts fakeServerOpts) *pipeRWC {
 				// Deliver one message to exercise the Subscribe -> newSub -> bridge path.
 				subID, _ := f.Header.Contains(frame.Id)
 				dest, _ := f.Header.Contains(frame.Destination)
+				if opts.messageDestination != "" {
+					dest = opts.messageDestination
+				}
 				msg := frame.New(frame.MESSAGE,
 					frame.Subscription, subID,
 					frame.Destination, dest,
@@ -493,6 +531,45 @@ func TestConn_Subscribe(t *testing.T) {
 	// Disconnect closes the connection; the read loop closes gossub.C; bridge
 	// exits via !ok; sub.C() closes. Drain sub.C() to let the bridge goroutine
 	// finish before the test returns.
+	if err := c.Disconnect(); err != nil {
+		t.Errorf("Disconnect: %v", err)
+	}
+	for range sub.C() {
+	}
+}
+
+// TestConn_SubscribeWildcardKeepsConcreteDestination checks that a message
+// delivered on a wildcard subscription carries the destination header of its
+// MESSAGE frame, not the subscribed pattern. The MESSAGE frame's required
+// destination header is defined in the STOMP 1.2 specification, section
+// "MESSAGE".
+func TestConn_SubscribeWildcardKeepsConcreteDestination(t *testing.T) {
+	t.Parallel()
+	const (
+		pattern  = "/topic/goss.gridappsd.field.>"
+		concrete = "/topic/goss.gridappsd.field.feeder1.bus7"
+	)
+	rwc := startFakeSTOMPServerOpts(t, fakeServerOpts{messageDestination: concrete})
+	c, err := (&Dialer{}).Dial(context.Background(), rwc, transport.ConnConfig{Login: "u", Passcode: "p"})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	sub, err := c.Subscribe(context.Background(), pattern)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	m := <-sub.C()
+	if m.Err != nil {
+		t.Fatalf("received error: %v", m.Err)
+	}
+	if m.Destination != concrete {
+		t.Errorf("Destination: want %q, got %q", concrete, m.Destination)
+	}
+	if string(m.Body) != "hello" {
+		t.Errorf("body: want 'hello', got %q", string(m.Body))
+	}
+
 	if err := c.Disconnect(); err != nil {
 		t.Errorf("Disconnect: %v", err)
 	}
