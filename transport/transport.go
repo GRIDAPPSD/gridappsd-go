@@ -58,6 +58,10 @@ type ConnConfig struct {
 // Msg is a single message received on a Subscription.
 type Msg struct {
 	Body []byte
+	// Destination is the destination header of the MESSAGE frame that carried
+	// Body: the concrete topic or queue, which differs from the subscribed
+	// destination when that is a wildcard. It is empty when Err is set.
+	Destination string
 	// Err is non-nil when the broker reported an error or the subscription
 	// was closed unexpectedly before a message was delivered.
 	Err error

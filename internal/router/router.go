@@ -4,16 +4,14 @@
 //
 // The Python router uses a single STOMP listener that receives all messages
 // across all destinations. Each frame carries a "destination" header the router
-// reads to look up the callback list (goss.py:437). The phase-1 Go transport
-// does NOT expose this: transport.Subscribe returns a per-destination
-// Subscription, and transport.Msg{Body, Err} carries no destination header.
-// There is no global listener and no destination on the message.
+// reads to look up the callback list (goss.py:437). The Go transport has no
+// global listener: transport.Subscribe returns a per-destination Subscription.
 //
 // Chosen approach: the router owns one transport.Subscription and one reader
 // goroutine PER destination. The subscription's identity IS the destination
-// (the router holds the mapping), so the missing destination header is supplied
-// by the router, not the message. This fits the phase-1 per-destination
-// Subscribe exactly and needs no phase-1 change.
+// (the router holds the mapping), so the router supplies the destination for
+// its callbacks rather than reading it from the message. This fits the
+// per-destination Subscribe exactly.
 //
 // Concurrency model:
 //   - One sync.Mutex guards both the destination->handlers map and the

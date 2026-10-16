@@ -350,7 +350,7 @@ func (s *sub) bridge(ctx context.Context) {
 			if out == nil {
 				continue
 			}
-			m := transport.Msg{Body: msg.Body}
+			m := transport.Msg{Body: msg.Body, Destination: msg.Destination}
 			if msg.Err != nil {
 				m = transport.Msg{Err: msg.Err}
 			}
