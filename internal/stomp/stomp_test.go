@@ -294,6 +294,10 @@ type fakeServerOpts struct {
 	// delivering a wildcard subscription names the concrete destination.
 	messageDestination string
 
+	// emptyMessageDestination makes the canned MESSAGE carry an empty
+	// destination header, overriding messageDestination.
+	emptyMessageDestination bool
+
 	// disconnectReceiptDelay delays the broker's DISCONNECT receipt.
 	disconnectReceiptDelay time.Duration
 
@@ -372,6 +376,9 @@ func startFakeSTOMPServerOpts(t *testing.T, opts fakeServerOpts) *pipeRWC {
 				dest, _ := f.Header.Contains(frame.Destination)
 				if opts.messageDestination != "" {
 					dest = opts.messageDestination
+				}
+				if opts.emptyMessageDestination {
+					dest = ""
 				}
 				msg := frame.New(frame.MESSAGE,
 					frame.Subscription, subID,
@@ -772,5 +779,37 @@ func TestEndsConn(t *testing.T) {
 		if got := endsConn(tc.err); got != tc.want {
 			t.Errorf("%s: endsConn = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestConn_EmptyMessageDestinationForwardsEmpty checks that a MESSAGE frame
+// with an empty destination header reaches the consumer with an empty
+// Destination, not the subscribed pattern.
+func TestConn_EmptyMessageDestinationForwardsEmpty(t *testing.T) {
+	t.Parallel()
+	const pattern = "/topic/goss.gridappsd.field.>"
+	rwc := startFakeSTOMPServerOpts(t, fakeServerOpts{emptyMessageDestination: true})
+	c, err := (&Dialer{}).Dial(context.Background(), rwc, transport.ConnConfig{Login: "u", Passcode: "p"})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	sub, err := c.Subscribe(context.Background(), pattern)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	m := <-sub.C()
+	if m.Err != nil {
+		t.Fatalf("received error: %v", m.Err)
+	}
+	if m.Destination != "" {
+		t.Errorf("Destination: want empty, got %q", m.Destination)
+	}
+	if string(m.Body) != "hello" {
+		t.Errorf("body: want 'hello', got %q", string(m.Body))
+	}
+
+	if err := c.Disconnect(); err != nil {
+		t.Errorf("Disconnect: %v", err)
 	}
 }
