@@ -21,8 +21,9 @@
 //     %p func-pointer duplicate guard from the initial implementation.
 //   - Subscribe/Unsubscribe operate over one transport.Subscription per destination
 //     (one reader goroutine per destination) rather than a single global listener,
-//     because the phase-1 transport.Msg carries no destination header. The
-//     behavioral result is the same: per-destination callback dispatch.
+//     so the router dispatches by the subscribed destination, not by the
+//     MESSAGE destination header. The behavioral result is the same:
+//     per-destination callback dispatch.
 package fieldbus
 
 import (

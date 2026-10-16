@@ -80,7 +80,7 @@ func TestRouter_TwoHandlersSameDestination(t *testing.T) {
 		t.Errorf("handler B body: got %q, want %q", gotB, want)
 	}
 
-	// Assert the destination header is correct (router owns this; transport.Msg has none).
+	// The router supplies the subscribed destination as the handler header.
 	if hdrsA[message.HeaderDestination] != dest {
 		t.Errorf("handler A destination header: got %q, want %q", hdrsA[message.HeaderDestination], dest)
 	}

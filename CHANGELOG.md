@@ -8,6 +8,12 @@ tags.
 
 ## [Unreleased]
 
+### Added
+
+- `transport.Msg.Destination`, the destination header of the MESSAGE frame
+  that carried the body, so a wildcard subscription can tell which concrete
+  destination a message was sent to. It is empty when `Err` is set (#52).
+
 ## [0.3.3] - 2026-10-09
 
 ### Changed
